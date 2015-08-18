@@ -12,7 +12,7 @@ Coroutine scheduling with work-stealing algorithm.
 
 ```toml
 [dependencies]
-git = "https://github.com/zonyitoo/coio.git"
+git = "https://github.com/zonyitoo/coio-rs.git"
 ```
 
 ### Basic Coroutines
