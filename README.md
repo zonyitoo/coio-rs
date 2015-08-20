@@ -1,5 +1,7 @@
 # Coroutine I/O
 
+[![Build Status](https://img.shields.io/travis/zonyitoo/coio-rs.svg)](https://travis-ci.org/zonyitoo/coio-rs)
+
 Coroutine scheduling with work-stealing algorithm.
 
 ## Feature
@@ -20,12 +22,13 @@ git = "https://github.com/zonyitoo/coio-rs.git"
 ```rust
 extern crate coio;
 
-use coio::Scheduler;
+use coio::{Scheduler, spawn, sched};
 
 fn main() {
-    Scheduler::spawn(|| {
+    spawn(|| {
         for _ in 0..10 {
             println!("Heil Hydra");
+            sched();
         }
     });
 
@@ -36,12 +39,12 @@ fn main() {
 ### TCP Echo Server
 
 ```rust
-extern crate simplesched;
+extern crate coio;
 
 use std::io::{Read, Write};
 
-use simplesched::net::TcpListener;
-use simplesched::Scheduler;
+use coio::net::TcpListener;
+use coio::Scheduler;
 
 fn main() {
     // Spawn a coroutine for accepting new connections
@@ -94,12 +97,12 @@ $ wrk -c 400 -t 2 http://127.0.0.1:8000/
 Running 10s test @ http://127.0.0.1:8000/
   2 threads and 400 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     7.75ms    7.53ms 103.39ms   86.43%
-    Req/Sec    29.98k     3.79k   43.40k    83.50%
-  596968 requests in 10.04s, 51.24MB read
-  Socket errors: connect 0, read 105, write 0, timeout 0
-Requests/sec:  59434.56
-Transfer/sec:      5.10MB
+    Latency     9.57ms   12.11ms 116.17ms   88.03%
+    Req/Sec    30.89k     5.68k   41.64k    66.50%
+  614593 requests in 10.03s, 52.75MB read
+  Socket errors: connect 0, read 208, write 11, timeout 0
+Requests/sec:  61292.98
+Transfer/sec:      5.26MBB
 ```
 
 Run the sample HTTP server in Go with `GOMAXPROCS=4`:
@@ -109,9 +112,10 @@ $ wrk -c 400 -t 2 http://127.0.0.1:8000/
 Running 10s test @ http://127.0.0.1:8000/
   2 threads and 400 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     6.18ms    3.91ms  84.05ms   86.07%
-    Req/Sec    28.09k     6.93k   48.67k    71.21%
-  560568 requests in 10.08s, 72.17MB read
-Requests/sec:  55607.02
-Transfer/sec:      7.16MB
+    Latency     6.19ms    3.29ms  87.45ms   83.29%
+    Req/Sec    29.40k     4.97k   44.59k    72.22%
+  584380 requests in 10.04s, 75.24MB read
+  Socket errors: connect 0, read 57, write 8, timeout 0
+Requests/sec:  58219.75
+Transfer/sec:      7.50MB
 ```

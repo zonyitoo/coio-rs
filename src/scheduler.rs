@@ -138,7 +138,9 @@ impl Scheduler {
                 let stealer = Processor::current().stealer();
                 for neigh in guard.iter() {
                     let &(ref sender, _) = neigh;
-                    sender.send(ProcMessage::NewNeighbor(stealer.clone())).unwrap();
+                    if let Err(err) = sender.send(ProcMessage::NewNeighbor(stealer.clone())) {
+                        error!("Error while sending NewNeighbor {:?}", err);
+                    }
                 }
 
                 guard.push((hdl, stealer));

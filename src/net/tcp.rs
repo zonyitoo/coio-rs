@@ -213,10 +213,6 @@ impl io::Read for TcpStream {
             Ok(None) => {
                 debug!("TcpStream read WouldBlock");
             },
-            Ok(Some(0)) => {
-                debug!("TcpStream read 0 bytes; may be EOF");
-                return Ok(0);
-            },
             Ok(Some(len)) => {
                 debug!("TcpStream read {} bytes", len);
                 return Ok(len);
@@ -234,10 +230,6 @@ impl io::Read for TcpStream {
             match self.0.try_read(buf) {
                 Ok(None) => {
                     debug!("TcpStream read WouldBlock");
-                },
-                Ok(Some(0)) => {
-                    debug!("TcpStream read 0 bytes; may be EOF");
-                    return Ok(0);
                 },
                 Ok(Some(len)) => {
                     debug!("TcpStream read {} bytes", len);
@@ -259,10 +251,6 @@ impl io::Write for TcpStream {
             Ok(None) => {
                 debug!("TcpStream write WouldBlock");
             },
-            Ok(Some(0)) => {
-                debug!("TcpStream write 0 bytes; may be EOF");
-                return Ok(0);
-            },
             Ok(Some(len)) => {
                 debug!("TcpStream written {} bytes", len);
                 return Ok(len);
@@ -280,10 +268,6 @@ impl io::Write for TcpStream {
             match self.0.try_write(buf) {
                 Ok(None) => {
                     debug!("TcpStream write WouldBlock");
-                },
-                Ok(Some(0)) => {
-                    debug!("TcpStream write 0 bytes; may be EOF");
-                    return Ok(0);
                 },
                 Ok(Some(len)) => {
                     debug!("TcpStream written {} bytes", len);
