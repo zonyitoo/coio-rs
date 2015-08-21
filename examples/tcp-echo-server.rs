@@ -34,7 +34,7 @@ fn main() {
         }.unwrap();
         server.set_reuseaddr(true).unwrap();
         server.bind(&addr).unwrap();
-        let server = server.listen(64).unwrap();
+        let server = server.listen(1024).unwrap();
 
         info!("Listening on {:?}", server.local_addr().unwrap());
 
@@ -45,7 +45,7 @@ fn main() {
             info!("Accept connection: {:?}", stream.peer_addr().unwrap());
 
             Scheduler::spawn(move|| {
-                let mut buf = [0; 10240];
+                let mut buf = [0; 1024*16];
 
                 loop {
                     debug!("Trying to Read...");
