@@ -22,7 +22,7 @@ git = "https://github.com/zonyitoo/coio-rs.git"
 ```rust
 extern crate coio;
 
-use coio::{Scheduler, spawn, sched};
+use coio::{run, spawn, sched};
 
 fn main() {
     spawn(|| {
@@ -32,7 +32,7 @@ fn main() {
         }
     });
 
-    Scheduler::run(1);
+    run(1);
 }
 ```
 
@@ -44,11 +44,11 @@ extern crate coio;
 use std::io::{Read, Write};
 
 use coio::net::TcpListener;
-use coio::Scheduler;
+use coio::{spawn, run};
 
 fn main() {
     // Spawn a coroutine for accepting new connections
-    Scheduler::spawn(move|| {
+    spawn(move|| {
         let acceptor = TcpListener::bind("127.0.0.1:8080").unwrap();
         println!("Waiting for connection ...");
 
@@ -58,7 +58,7 @@ fn main() {
             println!("Got connection from {:?}", stream.peer_addr().unwrap());
 
             // Spawn a new coroutine to handle the connection
-            Scheduler::spawn(move|| {
+            spawn(move|| {
                 let mut buf = [0; 1024];
 
                 loop {
@@ -84,38 +84,29 @@ fn main() {
     });
 
     // Schedule with 4 threads
-    Scheduler::run(4);
+    run(4);
 }
 ```
 
 ## Basic Benchmarks
 
-Run the `http-echo-server` in the example with 4 threads:
+Run the `tcp-echo-server` in the example with 4 threads:
 
 ```
-$ wrk -c 400 -t 2 http://127.0.0.1:8000/
-Running 10s test @ http://127.0.0.1:8000/
-  2 threads and 400 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     9.57ms   12.11ms 116.17ms   88.03%
-    Req/Sec    30.89k     5.68k   41.64k    66.50%
-  614593 requests in 10.03s, 52.75MB read
-  Socket errors: connect 0, read 208, write 11, timeout 0
-Requests/sec:  61292.98
-Transfer/sec:      5.26MBB
+Benchmarking: 127.0.0.1:8000
+128 clients, running 26 bytes, 30 sec.
+
+Speed: 71344 request/sec, 71344 response/sec
+Requests: 2140348
 ```
 
-Run the sample HTTP server in Go with `GOMAXPROCS=4`:
+Run the sample TCP server in Go 1.5 with `GOMAXPROCS=4`:
 
 ```
-$ wrk -c 400 -t 2 http://127.0.0.1:8000/
-Running 10s test @ http://127.0.0.1:8000/
-  2 threads and 400 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     6.19ms    3.29ms  87.45ms   83.29%
-    Req/Sec    29.40k     4.97k   44.59k    72.22%
-  584380 requests in 10.04s, 75.24MB read
-  Socket errors: connect 0, read 57, write 8, timeout 0
-Requests/sec:  58219.75
-Transfer/sec:      7.50MB
+Benchmarking: 127.0.0.1:8000
+128 clients, running 26 bytes, 30 sec.
+
+Speed: 70789 request/sec, 70789 response/sec
+Requests: 2123691
+Responses: 2123691
 ```
