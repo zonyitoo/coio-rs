@@ -26,13 +26,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 use std::default::Default;
+use std::any::Any;
+use std::rt;
 
 use mio::util::BoundedQueue;
 
 use deque::Stealer;
 
 use processor::{Processor, ProcMessage};
-
 use coroutine::Coroutine;
 use options::Options;
 
@@ -56,6 +57,18 @@ impl CoroutineRefMut {
 }
 
 unsafe impl Send for CoroutineRefMut {}
+
+pub struct JoinHandle<T> {
+    result: ::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>,
+}
+
+impl<T> JoinHandle<T> {
+    pub fn join(&mut self) -> Result<T, Box<Any + Send + 'static>> {
+        self.result.recv().expect("Failed to receive from the channel")
+    }
+}
+
+unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 /// Coroutine scheduler
 pub struct Scheduler {
@@ -110,18 +123,36 @@ impl Scheduler {
     }
 
     /// Spawn a new coroutine
-    pub fn spawn<F>(f: F)
-        where F: FnOnce() + 'static + Send
+    pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
     {
         Scheduler::spawn_opts(f, Default::default())
     }
 
     /// Spawn a new coroutine with options
-    pub fn spawn_opts<F>(f: F, opts: Options)
-        where F: FnOnce() + 'static + Send
+    pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
     {
         Scheduler::get().work_counts.fetch_add(1, Ordering::SeqCst);
-        Processor::current().spawn_opts(f, opts);
+
+        let (tx, rx) = ::sync::mpsc::channel();
+        let wrapper = move|| unsafe {
+            let mut output = None;
+            let ret = {
+                let ptr = &mut output;
+                rt::unwind::try(move|| *ptr = Some(f()))
+            };
+
+            // No matter whether it is panicked or not, the result will be sent to the channel
+            let _ = tx.send(ret.map(|()| output.unwrap())); // Just ignore if it failed
+        };
+        Processor::current().spawn_opts(Box::new(wrapper), opts);
+
+        JoinHandle {
+            result: rx,
+        }
     }
 
     /// Run the scheduler with `n` threads
@@ -174,5 +205,18 @@ impl Scheduler {
     /// Block the current coroutine
     pub fn block() {
         Processor::current().block();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_join_basic() {
+        let mut guard = Scheduler::spawn(|| 1);
+        Scheduler::run(1);
+
+        assert_eq!(1, guard.join().unwrap());
     }
 }

@@ -19,14 +19,14 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use std::rt;
 use std::cell::UnsafeCell;
 use std::mem;
-use std::any::Any;
+use std::boxed::FnBox;
+
+use libc;
 
 use context::{Context, Stack};
 use context::stack::StackPool;
-use context::thunk::Thunk;
 
 use processor::Processor;
 use options::Options;
@@ -34,28 +34,16 @@ use options::Options;
 thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPool::new()));
 
 /// Initialization function for make context
-extern "C" fn coroutine_initialize(_: usize, f: *mut ()) -> ! {
-    let ret = unsafe {
-        let func: Box<Thunk> = mem::transmute(f);
-        rt::unwind::try(move|| func.invoke(()))
+extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
+    unsafe {
+        let func: Box<Box<FnBox()>> = Box::from_raw(f as *mut Box<FnBox()>);
+        func()
     };
 
     let processor = Processor::current();
+    processor.yield_with(Ok(State::Finished));
 
-    let st = match ret {
-        Ok(..) => {
-            processor.yield_with(Ok(State::Finished));
-            State::Finished
-        },
-        Err(err) => {
-            processor.yield_with(Err(Error::Panicking(err)));
-            State::Panicked
-        }
-    };
-
-    loop {
-        processor.yield_with(Ok(st));
-    }
+    unreachable!("Should not reach here");
 }
 
 pub type Handle = Box<Coroutine>;
@@ -74,8 +62,8 @@ impl Coroutine {
         })
     }
 
-    pub fn spawn_opts<F>(f: F, opts: Options) -> Handle
-        where F: FnOnce() + Send + 'static
+    pub fn spawn_opts<F>(f: Box<F>, opts: Options) -> Handle
+        where F: FnBox() + 'static
     {
         let mut stack = STACK_POOL.with(|pool| unsafe {
             (&mut *pool.get()).take_stack(opts.stack_size)
@@ -111,13 +99,7 @@ impl Drop for Coroutine {
 pub enum State {
     Suspended,
     Blocked,
-    Panicked,
     Finished,
 }
 
-#[derive(Debug)]
-pub enum Error {
-    Panicking(Box<Any + Send>),
-}
-
-pub type Result<T> = ::std::result::Result<T, Error>;
+pub type Result<T> = ::std::result::Result<T, ()>;

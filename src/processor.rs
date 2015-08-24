@@ -31,6 +31,7 @@ use std::convert::From;
 use std::thread;
 use std::mem;
 use std::sync::mpsc::{self, Sender, Receiver};
+use std::boxed::FnBox;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
@@ -65,8 +66,6 @@ pub struct Processor {
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
 
-    new_spawned: Option<CoroutineRefMut>,
-
     is_scheduling: bool,
     has_ready_tasks: bool,
 }
@@ -99,15 +98,13 @@ impl Processor {
             chan_sender: tx,
             chan_receiver: rx,
 
-            new_spawned: None,
-
             is_scheduling: false,
             has_ready_tasks: false,
         }
     }
 
     #[doc(hidden)]
-    pub fn running(&mut self) -> Option<CoroutineRefMut> {
+    pub unsafe fn running(&mut self) -> Option<CoroutineRefMut> {
         self.cur_running
     }
 
@@ -134,18 +131,14 @@ impl Processor {
         self.queue_worker.push(coro);
     }
 
-    pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
-        where F: FnOnce() + Send + 'static
+    pub fn spawn_opts<F>(&mut self, f: Box<F>, opts: Options)
+        where F: FnBox() + 'static
     {
         let coro = Coroutine::spawn_opts(f, opts);
         let coro = CoroutineRefMut::new(unsafe { mem::transmute(coro) });
 
-        if self.is_scheduling {
-            self.new_spawned = Some(coro);
-            self.sched();
-        } else {
-            self.ready(coro);
-        }
+        self.ready(coro);
+        self.sched();
     }
 
     #[doc(hidden)]
@@ -153,27 +146,34 @@ impl Processor {
         self.last_result = Some(r);
     }
 
-    fn process_task(&mut self, hdl: CoroutineRefMut) {
-        match self.resume(hdl) {
-            Ok(State::Suspended) => {
-                Scheduler::ready(hdl);
-            },
-            Ok(State::Finished) | Ok(State::Panicked) => {
-                Scheduler::finished(hdl);
-            },
-            Ok(State::Blocked) => (),
-            Err(err) => {
-                error!("Coroutine resume failed, {:?}", err);
-                Scheduler::finished(hdl);
+    fn run_with_all_local_tasks(&mut self, hdl: CoroutineRefMut) {
+        let mut hdl = hdl;
+        loop {
+            let is_suspended = match self.resume(hdl) {
+                Ok(State::Suspended) => {
+                    true
+                },
+                Ok(State::Finished) | Err(..) => {
+                    Scheduler::finished(hdl);
+                    false
+                },
+                Ok(..) => {
+                    false
+                }
+            };
+
+            // Try to fetch one task from the local queue
+            let next_hdl = self.queue_worker.pop();
+            if is_suspended {
+                // If the current task has to be suspended, then
+                // push it back to the local work queue
+                self.ready(hdl);
             }
-        }
-    }
 
-    fn run_task(&mut self, hdl: CoroutineRefMut) {
-        self.process_task(hdl);
-
-        while let Some(hdl) = self.new_spawned.take() {
-            self.process_task(hdl);
+            match next_hdl {
+                Some(h) => hdl = h,
+                None => break
+            }
         }
     }
 
@@ -191,13 +191,8 @@ impl Processor {
             }
 
             // 1. Run all tasks in local queue
-            let mut has_local_work = false;
-            while let Some(hdl) = self.queue_worker.pop() {
-                has_local_work = true;
-                self.run_task(hdl);
-            }
-
-            if has_local_work {
+            if let Some(hdl) = self.queue_worker.pop() {
+                self.run_with_all_local_tasks(hdl);
                 continue;
             } else {
                 self.has_ready_tasks = false;
@@ -223,7 +218,8 @@ impl Processor {
             } else if Scheduler::get().work_count() == 0 {
                 break;
             } else {
-
+                // We don't have active tasks in the local queue
+                // And we don't have any activated tasks from event loop
             }
 
             // 4. Randomly steal from neighbors
@@ -231,7 +227,7 @@ impl Processor {
             let total_stealers = self.neighbor_stealers.len();
             for idx in (0..self.neighbor_stealers.len()).map(|x| (x + rand_idx) % total_stealers) {
                 if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
-                    self.run_task(hdl);
+                    self.run_with_all_local_tasks(hdl);
                     continue 'outerloop;
                 }
             }
@@ -305,7 +301,7 @@ impl IoHandler {
 impl Processor {
     /// Register and wait I/O
     pub fn wait_event<E: Evented + AsRawFd>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.handler.slabs.insert((Processor::current().running().unwrap(),
+        let token = self.handler.slabs.insert((unsafe { Processor::current().running().unwrap() },
                                                From::from(fd.as_raw_fd()))).unwrap();
         try!(self.event_loop.register_opt(fd, token, interest,
                                           PollOpt::edge()|PollOpt::oneshot()));
@@ -356,7 +352,7 @@ impl Handler for IoHandler {
 impl Processor {
     /// Register and wait I/O
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.handler.slabs.insert(Processor::current().running().unwrap()).unwrap();
+        let token = self.handler.slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
         try!(self.event_loop.register_opt(fd, token, interest,
                                           PollOpt::edge()|PollOpt::oneshot()));
 

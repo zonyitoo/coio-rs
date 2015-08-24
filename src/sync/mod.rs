@@ -25,3 +25,4 @@
 pub use self::mutex::Mutex;
 
 pub mod mutex;
+pub mod mpsc;

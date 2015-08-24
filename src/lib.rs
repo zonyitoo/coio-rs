@@ -1,5 +1,5 @@
 
-#![feature(rt, reflect_marker, box_raw)]
+#![feature(rt, libc, reflect_marker, box_raw, fnbox, result_expect)]
 
 #[macro_use]
 extern crate lazy_static;
@@ -12,8 +12,9 @@ extern crate hyper;
 extern crate url;
 extern crate deque;
 extern crate rand;
+extern crate libc;
 
-pub use scheduler::Scheduler;
+pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
 
 pub mod net;
@@ -24,15 +25,17 @@ pub mod processor;
 mod coroutine;
 
 /// Spawn a new Coroutine
-pub fn spawn<F>(f: F)
-    where F: FnOnce() + Send + 'static
+pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+    where F: FnOnce() -> T + Send + 'static,
+          T: Send + 'static
 {
     Scheduler::spawn(f)
 }
 
 /// Spawn a new Coroutine with options
-pub fn spawn_opts<F>(f: F, opts: Options)
-    where F: FnOnce() + Send + 'static
+pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
+    where F: FnOnce() -> T + Send + 'static,
+          T: Send + 'static
 {
     Scheduler::spawn_opts(f, opts)
 }
@@ -40,6 +43,11 @@ pub fn spawn_opts<F>(f: F, opts: Options)
 /// Giveup the CPU
 pub fn sched() {
     Scheduler::sched()
+}
+
+/// Run the scheduler with threads
+pub fn run(threads: usize) {
+    Scheduler::run(threads)
 }
 
 pub struct Builder {
@@ -63,8 +71,9 @@ impl Builder {
         self
     }
 
-    pub fn spawn<F>(self, f: F)
-        where F: FnOnce() + Send + 'static
+    pub fn spawn<F, T>(self, f: F) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
     {
         Scheduler::spawn_opts(f, self.opts)
     }
