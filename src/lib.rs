@@ -13,6 +13,7 @@ extern crate url;
 extern crate deque;
 extern crate rand;
 extern crate libc;
+extern crate chrono;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
@@ -50,22 +51,35 @@ pub fn run(threads: usize) {
     Scheduler::run(threads)
 }
 
+/// Put the current coroutine to sleep for the specific amount of time
+pub fn sleep_ms(ms: u32) {
+    use chrono::*;
+    let target = Local::now() + Duration::milliseconds(ms as i64);
+    while Local::now() < target {
+        sched();
+    }
+}
+
+/// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.
 pub struct Builder {
     opts: Options
 }
 
 impl Builder {
+    /// Generates the base configuration for spawning a coroutine, from which configuration methods can be chained.
     pub fn new() -> Builder {
         Builder {
             opts: Options::new()
         }
     }
 
+    /// Sets the size of the stack for the new coroutine.
     pub fn stack_size(mut self, stack_size: usize) -> Builder {
         self.opts.stack_size = stack_size;
         self
     }
 
+    /// Names the coroutine-to-be. Currently the name is used for identification only in panic messages.
     pub fn name(mut self, name: Option<String>) -> Builder {
         self.opts.name = name;
         self
@@ -76,5 +90,19 @@ impl Builder {
               T: Send + 'static
     {
         Scheduler::spawn_opts(f, self.opts)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sleep_ms() {
+        spawn(|| {
+            sleep_ms(1000);
+        });
+
+        run(1);
     }
 }
