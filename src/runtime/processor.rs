@@ -124,6 +124,7 @@ impl Processor {
     }
 
     #[inline]
+    // Get the current running coroutine
     pub unsafe fn running(&mut self) -> Option<*mut Coroutine> {
         self.cur_running
     }
@@ -150,6 +151,7 @@ impl Processor {
     }
 
     #[inline]
+    // Call by scheduler
     pub unsafe fn ready(&mut self, coro_ptr: *mut Coroutine) {
         self.has_ready_tasks = true;
         self.queue_worker.push(SendableCoroutinePtr(coro_ptr));
@@ -168,7 +170,7 @@ impl Processor {
     }
 
     #[inline]
-    pub fn set_last_result(&mut self, r: coroutine::Result<State>) {
+    fn set_last_result(&mut self, r: coroutine::Result<State>) {
         self.last_result = Some(r);
     }
 
