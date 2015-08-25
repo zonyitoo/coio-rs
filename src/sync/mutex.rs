@@ -74,6 +74,9 @@ impl<T> Mutex<T> {
 unsafe impl<T: Send> Send for Mutex<T> {}
 unsafe impl<T: Sync> Sync for Mutex<T> {}
 
+/// An RAII implementation of "scoped lock" of a mutex. When this structure is dropped,
+/// the lock will be unlocked.
+#[must_use]
 pub struct Guard<'a, T: 'a> {
     data: &'a mut T,
     mutex: &'a Mutex<T>,
@@ -107,6 +110,9 @@ impl<'a, T: 'a> DerefMut for Guard<'a, T> {
     }
 }
 
+/// A type of error which can be returned whenever a lock is acquired.
+///
+/// Currently this error does not act just like the [PoisonError](rust:#std::sync::PoisonError) does.
 pub struct PoisonError<T> {
     guard: T,
 }

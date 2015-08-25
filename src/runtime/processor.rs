@@ -46,25 +46,26 @@ use rand;
 
 use chrono::NaiveDateTime;
 
-use scheduler::{Scheduler, CoroutineRefMut};
-use coroutine::{self, Coroutine, State, Handle};
+use scheduler::Scheduler;
+use coroutine::{self, Coroutine, State, Handle, SendableCoroutinePtr};
 use options::Options;
 use runtime::timer::Timer;
+
+const MAX_TOKEN_NUM: usize = 102400;
 
 thread_local!(static PROCESSOR: UnsafeCell<Processor> = UnsafeCell::new(Processor::new()));
 
 /// Processing unit of a thread
 pub struct Processor {
-    event_loop: EventLoop<IoHandler>,
-    // global_work_queue: Arc<BoundedQueue<CoroutineRefMut>>,
-    handler: IoHandler,
+    event_loop: EventLoop<Processor>,
+
     main_coro: Handle,
-    cur_running: Option<CoroutineRefMut>,
+    cur_running: Option<*mut Coroutine>,
     last_result: Option<coroutine::Result<State>>,
 
-    queue_worker: Worker<CoroutineRefMut>,
-    queue_stealer: Stealer<CoroutineRefMut>,
-    neighbor_stealers: Vec<Stealer<CoroutineRefMut>>,
+    queue_worker: Worker<SendableCoroutinePtr>,
+    queue_stealer: Stealer<SendableCoroutinePtr>,
+    neighbor_stealers: Vec<Stealer<SendableCoroutinePtr>>,
 
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
@@ -73,6 +74,17 @@ pub struct Processor {
     has_ready_tasks: bool,
 
     coroutine_timer: Timer,
+
+    #[cfg(any(target_os = "linux",
+              target_os = "android"))]
+    io_slabs: Slab<(*mut Coroutine, Io)>,
+    #[cfg(any(target_os = "macos",
+              target_os = "freebsd",
+              target_os = "dragonfly",
+              target_os = "ios",
+              target_os = "bitrig",
+              target_os = "openbsd"))]
+    io_slabs: Slab<*mut Coroutine>,
 }
 
 impl Processor {
@@ -80,7 +92,7 @@ impl Processor {
         Processor::new_with_neighbors(Vec::new())
     }
 
-    fn new_with_neighbors(neigh: Vec<Stealer<CoroutineRefMut>>) -> Processor {
+    fn new_with_neighbors(neigh: Vec<Stealer<SendableCoroutinePtr>>) -> Processor {
         let main_coro = unsafe {
             Coroutine::empty()
         };
@@ -89,9 +101,8 @@ impl Processor {
         let (tx, rx) = mpsc::channel();
 
         Processor {
-            event_loop: EventLoop::new().unwrap(),
-            // global_work_queue: Scheduler::get().get_queue(),
-            handler: IoHandler::new(),
+            event_loop: EventLoop::new().expect("Unable to create the eventloop"),
+
             main_coro: main_coro,
             cur_running: None,
             last_result: None,
@@ -107,54 +118,63 @@ impl Processor {
             has_ready_tasks: false,
 
             coroutine_timer: Timer::new(),
+
+            io_slabs: Slab::new(MAX_TOKEN_NUM),
         }
     }
 
-    #[doc(hidden)]
-    pub unsafe fn running(&mut self) -> Option<CoroutineRefMut> {
+    #[inline]
+    pub unsafe fn running(&mut self) -> Option<*mut Coroutine> {
         self.cur_running
     }
 
-    #[doc(hidden)]
-    pub fn set_neighbors(&mut self, neigh: Vec<Stealer<CoroutineRefMut>>) {
+    #[inline]
+    pub fn set_neighbors(&mut self, neigh: Vec<Stealer<SendableCoroutinePtr>>) {
         self.neighbor_stealers = neigh;
     }
 
     /// Get the thread local processor
+    #[inline]
     pub fn current() -> &'static mut Processor {
         PROCESSOR.with(|p| unsafe { &mut *p.get() })
     }
 
-    pub fn stealer(&self) -> Stealer<CoroutineRefMut> {
+    #[inline]
+    pub fn stealer(&self) -> Stealer<SendableCoroutinePtr> {
         self.queue_stealer.clone()
     }
 
+    #[inline]
     pub fn handle(&self) -> Sender<ProcMessage> {
         self.chan_sender.clone()
     }
 
-    pub fn ready(&mut self, coro: CoroutineRefMut) {
+    #[inline]
+    pub unsafe fn ready(&mut self, coro_ptr: *mut Coroutine) {
         self.has_ready_tasks = true;
-        self.queue_worker.push(coro);
+        self.queue_worker.push(SendableCoroutinePtr(coro_ptr));
     }
 
+    #[inline]
     pub fn spawn_opts<F>(&mut self, f: Box<F>, opts: Options)
         where F: FnBox() + 'static
     {
         let coro = Coroutine::spawn_opts(f, opts);
-        let coro = CoroutineRefMut::new(unsafe { mem::transmute(coro) });
 
-        self.ready(coro);
+        unsafe {
+            self.ready(mem::transmute(coro));
+        }
         self.sched();
     }
 
-    #[doc(hidden)]
+    #[inline]
     pub fn set_last_result(&mut self, r: coroutine::Result<State>) {
         self.last_result = Some(r);
     }
 
-    fn run_with_all_local_tasks(&mut self, hdl: CoroutineRefMut) {
-        let mut hdl = hdl;
+    #[inline]
+    unsafe fn run_with_all_local_tasks(&mut self, coro_ptr: *mut Coroutine) {
+        let mut hdl = coro_ptr;
         loop {
             let is_suspended = match self.resume(hdl) {
                 Ok(State::Suspended) => {
@@ -178,13 +198,13 @@ impl Processor {
             }
 
             match next_hdl {
-                Some(h) => hdl = h,
+                Some(h) => hdl = h.0,
                 None => break
             }
         }
     }
 
-    #[doc(hidden)]
+    /// Run the processor
     pub fn schedule(&mut self) -> io::Result<()> {
         self.is_scheduling = true;
 
@@ -199,19 +219,25 @@ impl Processor {
 
             // 1. Run all tasks in local queue
             if let Some(hdl) = self.queue_worker.pop() {
-                self.run_with_all_local_tasks(hdl);
+                unsafe {
+                    self.run_with_all_local_tasks(hdl.0);
+                }
             } else {
                 self.has_ready_tasks = false;
             }
 
             // 2. Get work from timer
-            while let Some(coro_ptr) = unsafe { self.coroutine_timer.try_awake() } {
-                self.run_with_all_local_tasks(CoroutineRefMut::new(coro_ptr));
+            unsafe {
+                while let Some(coro_ptr) = self.coroutine_timer.try_awake() {
+                    self.run_with_all_local_tasks(coro_ptr);
+                }
             }
 
             // 3. Well, check if there is some work could be waked up
-            if self.handler.slabs.count() != 0 {
-                if let Err(err) = self.event_loop.run_once(&mut self.handler) {
+            if self.io_slabs.count() != 0 {
+                // Make the borrow checker happy.
+                let proc_ptr: *mut Processor = self;
+                if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
                     self.is_scheduling = false;
                     error!("EventLoop failed with {:?}", err);
                     return Err(err);
@@ -220,7 +246,7 @@ impl Processor {
                 if self.has_ready_tasks {
                     continue;
                 }
-            } else if Scheduler::get().work_count() == 0 {
+            } else if Scheduler::instance().work_count() == 0 {
                 break;
             } else {
                 // We don't have active tasks in the local queue
@@ -232,7 +258,9 @@ impl Processor {
             let total_stealers = self.neighbor_stealers.len();
             for idx in (0..self.neighbor_stealers.len()).map(|x| (x + rand_idx) % total_stealers) {
                 if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
-                    self.run_with_all_local_tasks(hdl);
+                    unsafe {
+                        self.run_with_all_local_tasks(hdl.0);
+                    }
                     continue 'outerloop;
                 }
             }
@@ -245,11 +273,11 @@ impl Processor {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn resume(&mut self, coro_ref: CoroutineRefMut) -> coroutine::Result<State> {
-        self.cur_running = Some(coro_ref);
+    #[inline]
+    pub fn resume(&mut self, coro_ptr: *mut Coroutine) -> coroutine::Result<State> {
+        self.cur_running = Some(coro_ptr);
         unsafe {
-            self.main_coro.yield_to(&mut *coro_ref.coro_ptr);
+            self.main_coro.yield_to(&mut *coro_ptr);
         }
 
         match self.last_result.take() {
@@ -259,56 +287,53 @@ impl Processor {
     }
 
     /// Block the current coroutine until the specific time
-    pub fn wait_until(&mut self, target_time: NaiveDateTime) {
-        if let Some(coro_ref) = unsafe { self.running() } {
+    #[inline]
+    pub fn sleep_until(&mut self, target_time: NaiveDateTime) {
+        if let Some(coro_ptr) = unsafe { self.running() } {
             // Set into the timer
-            self.coroutine_timer.wait_until(coro_ref.coro_ptr, target_time);
+            self.coroutine_timer.wait_until(coro_ptr, target_time);
 
             // Just block it, the handle has already been sent to
             // the timer.
             self.block();
+        } else {
+            warn!("Called `wait_until` without running coroutine");
         }
     }
 
     /// Suspended the current running coroutine, equivalent to `Scheduler::sched`
+    #[inline]
     pub fn sched(&mut self) {
         match self.cur_running.take() {
             None => {},
-            Some(coro_ref) => unsafe {
+            Some(coro_ptr) => unsafe {
                 self.set_last_result(Ok(State::Suspended));
-                (&mut *coro_ref.coro_ptr).yield_to(&*self.main_coro)
+                (&mut *coro_ptr).yield_to(&*self.main_coro)
             }
         }
     }
 
     /// Block the current running coroutine, equivalent to `Scheduler::block`
+    #[inline]
     pub fn block(&mut self) {
         match self.cur_running.take() {
             None => {},
-            Some(coro_ref) => unsafe {
+            Some(coro_ptr) => unsafe {
                 self.set_last_result(Ok(State::Blocked));
-                (&mut *coro_ref.coro_ptr).yield_to(&*self.main_coro)
+                (&mut *coro_ptr).yield_to(&*self.main_coro)
             }
         }
     }
 
     /// Yield the current running coroutine with specified result
+    #[inline]
     pub fn yield_with(&mut self, r: coroutine::Result<State>) {
         match self.cur_running.take() {
             None => {},
-            Some(coro_ref) => unsafe {
+            Some(coro_ptr) => unsafe {
                 self.set_last_result(r);
-                (&mut *coro_ref.coro_ptr).yield_to(&*self.main_coro)
+                (&mut *coro_ptr).yield_to(&*self.main_coro)
             }
-        }
-    }
-}
-
-const MAX_TOKEN_NUM: usize = 102400;
-impl IoHandler {
-    fn new() -> IoHandler {
-        IoHandler {
-            slabs: Slab::new(MAX_TOKEN_NUM),
         }
     }
 }
@@ -318,13 +343,13 @@ impl IoHandler {
 impl Processor {
     /// Register and wait I/O
     pub fn wait_event<E: Evented + AsRawFd>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.handler.slabs.insert((unsafe { Processor::current().running().unwrap() },
+        let token = self.io_slabs.insert((unsafe { Processor::current().running().unwrap() },
                                                From::from(fd.as_raw_fd()))).unwrap();
         try!(self.event_loop.register_opt(fd, token, interest,
                                           PollOpt::edge()|PollOpt::oneshot()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
-        Scheduler::block();
+        self.block();
         debug!("wait_event: Waked up; token={:?}", token);
 
         Ok(())
@@ -333,25 +358,21 @@ impl Processor {
 
 #[cfg(any(target_os = "linux",
           target_os = "android"))]
-struct IoHandler {
-    slabs: Slab<(CoroutineRefMut, Io)>,
-}
-
-#[cfg(any(target_os = "linux",
-          target_os = "android"))]
-impl Handler for IoHandler {
+impl Handler for Processor {
     type Timeout = ();
     type Message = ();
 
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
 
-        match self.slabs.remove(token) {
+        match self.io_slabs.remove(token) {
             Some((hdl, fd)) => {
                 // Linux EPoll needs to explicit EPOLL_CTL_DEL the fd
                 event_loop.deregister(&fd).unwrap();
                 mem::forget(fd);
-                Scheduler::ready(hdl);
+                unsafe {
+                    self.ready(hdl);
+                }
             },
             None => {
                 warn!("No coroutine is waiting on readable {:?}", token);
@@ -369,13 +390,12 @@ impl Handler for IoHandler {
 impl Processor {
     /// Register and wait I/O
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.handler.slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
+        let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
         try!(self.event_loop.register_opt(fd, token, interest,
                                           PollOpt::edge()|PollOpt::oneshot()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
-        // Coroutine::block();
-        Scheduler::block();
+        self.block();
         debug!("wait_event: Waked up; token={:?}", token);
 
         Ok(())
@@ -388,26 +408,18 @@ impl Processor {
           target_os = "ios",
           target_os = "bitrig",
           target_os = "openbsd"))]
-struct IoHandler {
-    slabs: Slab<CoroutineRefMut>,
-}
-
-#[cfg(any(target_os = "macos",
-          target_os = "freebsd",
-          target_os = "dragonfly",
-          target_os = "ios",
-          target_os = "bitrig",
-          target_os = "openbsd"))]
-impl Handler for IoHandler {
+impl Handler for Processor {
     type Timeout = ();
     type Message = ();
 
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
 
-        match self.slabs.remove(token) {
+        match self.io_slabs.remove(token) {
             Some(hdl) => {
-                Scheduler::ready(hdl);
+                unsafe {
+                    self.ready(hdl);
+                }
             },
             None => {
                 warn!("No coroutine is waiting on readable {:?}", token);
@@ -417,5 +429,5 @@ impl Handler for IoHandler {
 }
 
 pub enum ProcMessage {
-    NewNeighbor(Stealer<CoroutineRefMut>),
+    NewNeighbor(Stealer<SendableCoroutinePtr>),
 }

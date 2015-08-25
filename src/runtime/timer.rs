@@ -35,12 +35,14 @@ struct SleepingTask {
 }
 
 impl PartialOrd<SleepingTask> for SleepingTask {
+    #[inline]
     fn partial_cmp(&self, other: &SleepingTask) -> Option<Ordering> {
         Some(other.expected_wakeup_time.cmp(&self.expected_wakeup_time))
     }
 }
 
 impl Ord for SleepingTask {
+    #[inline]
     fn cmp(&self, other: &SleepingTask) -> Ordering {
         other.expected_wakeup_time.cmp(&self.expected_wakeup_time)
     }
@@ -49,6 +51,7 @@ impl Ord for SleepingTask {
 unsafe impl Send for SleepingTask {}
 
 impl SleepingTask {
+    #[inline]
     fn new(coro_ptr: *mut Coroutine, wakeup: NaiveDateTime) -> SleepingTask {
         SleepingTask {
             coro_ptr: coro_ptr,
@@ -62,12 +65,14 @@ pub struct Timer {
 }
 
 impl Timer {
+    #[inline]
     pub fn new() -> Timer {
         Timer {
             sleeping_tasks: BinaryHeap::new(),
         }
     }
 
+    #[inline]
     pub fn wait_until(&mut self, coro_ptr: *mut Coroutine, wakeup: NaiveDateTime) {
         let new_task = SleepingTask::new(coro_ptr, wakeup);
         self.sleeping_tasks.push(new_task);

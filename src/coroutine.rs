@@ -103,3 +103,10 @@ pub enum State {
 }
 
 pub type Result<T> = ::std::result::Result<T, ()>;
+
+/// Sendable coroutine mutable pointer
+#[allow(raw_pointer_derive)]
+#[derive(Copy, Clone, Debug)]
+pub struct SendableCoroutinePtr(pub *mut Coroutine);
+
+unsafe impl Send for SendableCoroutinePtr {}

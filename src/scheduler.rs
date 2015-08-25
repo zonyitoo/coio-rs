@@ -23,46 +23,31 @@
 
 use std::thread;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::default::Default;
 use std::any::Any;
 use std::rt;
 
-use mio::util::BoundedQueue;
-
 use deque::Stealer;
 
 use runtime::processor::{Processor, ProcMessage};
-use coroutine::Coroutine;
+use coroutine::{Coroutine, SendableCoroutinePtr};
 use options::Options;
 
 lazy_static! {
     static ref SCHEDULER: Scheduler = Scheduler::new();
 }
 
-#[doc(hidden)]
-#[allow(raw_pointer_derive)]
-#[derive(Copy, Clone, Debug)]
-pub struct CoroutineRefMut {
-    pub coro_ptr: *mut Coroutine,
-}
-
-impl CoroutineRefMut {
-    pub fn new(coro: *mut Coroutine) -> CoroutineRefMut {
-        CoroutineRefMut {
-            coro_ptr: coro,
-        }
-    }
-}
-
-unsafe impl Send for CoroutineRefMut {}
-
+/// A handle that could join the coroutine
 pub struct JoinHandle<T> {
     result: ::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>,
 }
 
 impl<T> JoinHandle<T> {
+    /// Join the coroutine until it finishes.
+    ///
+    /// If it already finished, this method will return immediately.
     pub fn join(&mut self) -> Result<T, Box<Any + Send + 'static>> {
         self.result.recv().expect("Failed to receive from the channel")
     }
@@ -72,54 +57,49 @@ unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 /// Coroutine scheduler
 pub struct Scheduler {
-    global_queue: Arc<BoundedQueue<CoroutineRefMut>>,
     work_counts: AtomicUsize,
-    proc_handles: Mutex<Vec<(Sender<ProcMessage>, Stealer<CoroutineRefMut>)>>,
+    proc_handles: Mutex<Vec<(Sender<ProcMessage>, Stealer<SendableCoroutinePtr>)>>,
 }
 
 unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
-const GLOBAL_QUEUE_SIZE: usize = 0x1000;
-
 impl Scheduler {
     fn new() -> Scheduler {
         Scheduler {
-            global_queue: Arc::new(BoundedQueue::with_capacity(GLOBAL_QUEUE_SIZE)),
             work_counts: AtomicUsize::new(0),
             proc_handles: Mutex::new(Vec::new()),
         }
     }
 
     /// Get the global Scheduler
-    pub fn get() -> &'static Scheduler {
+    #[inline]
+    pub fn instance() -> &'static Scheduler {
         &SCHEDULER
     }
 
-    #[doc(hidden)]
     /// A coroutine is ready for schedule
-    pub fn ready(coro: CoroutineRefMut) {
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn ready(coro: *mut Coroutine) {
         Processor::current().ready(coro);
     }
 
-    #[doc(hidden)]
-    /// Get the global work queue
-    pub fn get_queue(&self) -> Arc<BoundedQueue<CoroutineRefMut>> {
-        self.global_queue.clone()
-    }
-
-    #[doc(hidden)]
     /// A coroutine is finished
-    pub fn finished(coro: CoroutineRefMut) {
-        Scheduler::get().work_counts.fetch_sub(1, Ordering::SeqCst);
+    ///
+    /// The coroutine will be destroy, make sure that the coroutine pointer is unique!
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn finished(coro_ptr: *mut Coroutine) {
+        Scheduler::instance().work_counts.fetch_sub(1, Ordering::SeqCst);
 
-        let boxed = unsafe { Box::from_raw(coro.coro_ptr) };
+        let boxed = Box::from_raw(coro_ptr);
         drop(boxed);
     }
 
-    /// Total work
+    /// Total works
     pub fn work_count(&self) -> usize {
-        Scheduler::get().work_counts.load(Ordering::SeqCst)
+        Scheduler::instance().work_counts.load(Ordering::SeqCst)
     }
 
     /// Spawn a new coroutine
@@ -135,7 +115,7 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        Scheduler::get().work_counts.fetch_add(1, Ordering::SeqCst);
+        Scheduler::instance().work_counts.fetch_add(1, Ordering::SeqCst);
 
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move|| unsafe {
@@ -158,11 +138,11 @@ impl Scheduler {
     /// Run the scheduler with `n` threads
     pub fn run(n: usize) {
         assert!(n >= 1, "There must be at least 1 thread");
-        Scheduler::get().proc_handles.lock().unwrap().clear();
+        Scheduler::instance().proc_handles.lock().unwrap().clear();
 
         fn do_work() {
             {
-                let mut guard = Scheduler::get().proc_handles.lock().unwrap();
+                let mut guard = Scheduler::instance().proc_handles.lock().unwrap();
                 Processor::current().set_neighbors(guard.iter().map(|x| x.1.clone()).collect());
 
                 let hdl = Processor::current().handle();
