@@ -26,6 +26,7 @@ pub mod processor;
 mod coroutine;
 
 /// Spawn a new Coroutine
+#[inline(always)]
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
     where F: FnOnce() -> T + Send + 'static,
           T: Send + 'static
@@ -34,6 +35,7 @@ pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 }
 
 /// Spawn a new Coroutine with options
+#[inline(always)]
 pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
     where F: FnOnce() -> T + Send + 'static,
           T: Send + 'static
@@ -42,16 +44,19 @@ pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
 }
 
 /// Giveup the CPU
+#[inline(always)]
 pub fn sched() {
     Scheduler::sched()
 }
 
 /// Run the scheduler with threads
+#[inline(always)]
 pub fn run(threads: usize) {
     Scheduler::run(threads)
 }
 
 /// Put the current coroutine to sleep for the specific amount of time
+#[inline]
 pub fn sleep_ms(ms: u32) {
     use chrono::*;
     let target = Local::now() + Duration::milliseconds(ms as i64);
@@ -74,17 +79,21 @@ impl Builder {
     }
 
     /// Sets the size of the stack for the new coroutine.
+    #[inline]
     pub fn stack_size(mut self, stack_size: usize) -> Builder {
         self.opts.stack_size = stack_size;
         self
     }
 
     /// Names the coroutine-to-be. Currently the name is used for identification only in panic messages.
+    #[inline]
     pub fn name(mut self, name: Option<String>) -> Builder {
         self.opts.name = name;
         self
     }
 
+    /// Spawn a new coroutine
+    #[inline]
     pub fn spawn<F, T>(self, f: F) -> JoinHandle<T>
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
