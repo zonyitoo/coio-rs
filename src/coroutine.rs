@@ -28,7 +28,7 @@ use libc;
 use context::{Context, Stack};
 use context::stack::StackPool;
 
-use processor::Processor;
+use runtime::processor::Processor;
 use options::Options;
 
 thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPool::new()));

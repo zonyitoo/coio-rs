@@ -44,9 +44,12 @@ use deque::{BufferPool, Stolen, Worker, Stealer};
 
 use rand;
 
+use chrono::NaiveDateTime;
+
 use scheduler::{Scheduler, CoroutineRefMut};
 use coroutine::{self, Coroutine, State, Handle};
 use options::Options;
+use runtime::timer::Timer;
 
 thread_local!(static PROCESSOR: UnsafeCell<Processor> = UnsafeCell::new(Processor::new()));
 
@@ -68,6 +71,8 @@ pub struct Processor {
 
     is_scheduling: bool,
     has_ready_tasks: bool,
+
+    coroutine_timer: Timer,
 }
 
 impl Processor {
@@ -100,6 +105,8 @@ impl Processor {
 
             is_scheduling: false,
             has_ready_tasks: false,
+
+            coroutine_timer: Timer::new(),
         }
     }
 
@@ -193,18 +200,16 @@ impl Processor {
             // 1. Run all tasks in local queue
             if let Some(hdl) = self.queue_worker.pop() {
                 self.run_with_all_local_tasks(hdl);
-                continue;
             } else {
                 self.has_ready_tasks = false;
             }
 
-            // 2. Get work from global work queue
-            // if let Some(hdl) = self.global_work_queue.pop() {
-            //     self.run_task(hdl);
-            //     continue;
-            // }
+            // 2. Get work from timer
+            while let Some(coro_ptr) = unsafe { self.coroutine_timer.try_awake() } {
+                self.run_with_all_local_tasks(CoroutineRefMut::new(coro_ptr));
+            }
 
-            // 3. Well, all failed! Go into idle
+            // 3. Well, check if there is some work could be waked up
             if self.handler.slabs.count() != 0 {
                 if let Err(err) = self.event_loop.run_once(&mut self.handler) {
                     self.is_scheduling = false;
@@ -250,6 +255,18 @@ impl Processor {
         match self.last_result.take() {
             None => Ok(State::Suspended),
             Some(r) => r,
+        }
+    }
+
+    /// Block the current coroutine until the specific time
+    pub fn wait_until(&mut self, target_time: NaiveDateTime) {
+        if let Some(coro_ref) = unsafe { self.running() } {
+            // Set into the timer
+            self.coroutine_timer.wait_until(coro_ref.coro_ptr, target_time);
+
+            // Just block it, the handle has already been sent to
+            // the timer.
+            self.block();
         }
     }
 

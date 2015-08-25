@@ -22,7 +22,7 @@ pub mod net;
 pub mod sync;
 pub mod scheduler;
 pub mod options;
-pub mod processor;
+mod runtime;
 mod coroutine;
 
 /// Spawn a new Coroutine
@@ -60,9 +60,9 @@ pub fn run(threads: usize) {
 pub fn sleep_ms(ms: u32) {
     use chrono::*;
     let target = Local::now() + Duration::milliseconds(ms as i64);
-    while Local::now() < target {
-        sched();
-    }
+
+    runtime::Processor::current()
+        .wait_until(target.naive_local());
 }
 
 /// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.

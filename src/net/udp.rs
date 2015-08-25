@@ -29,7 +29,7 @@ use mio::EventSet;
 
 use bytes::{Buf, MutBuf, SliceBuf, MutSliceBuf};
 
-use processor::Processor;
+use runtime::processor::Processor;
 
 pub struct UdpSocket(::mio::udp::UdpSocket);
 

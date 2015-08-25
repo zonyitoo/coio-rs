@@ -33,7 +33,7 @@ use mio::util::BoundedQueue;
 
 use deque::Stealer;
 
-use processor::{Processor, ProcMessage};
+use runtime::processor::{Processor, ProcMessage};
 use coroutine::Coroutine;
 use options::Options;
 

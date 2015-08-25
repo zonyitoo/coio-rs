@@ -29,7 +29,7 @@ use std::iter::Iterator;
 
 use mio::{self, EventSet};
 
-use processor::Processor;
+use runtime::processor::Processor;
 
 #[derive(Debug)]
 pub struct TcpSocket(::mio::tcp::TcpSocket);
