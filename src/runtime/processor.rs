@@ -210,13 +210,6 @@ impl Processor {
 
         'outerloop:
         loop {
-            // 0. Check the mailbox
-            while let Ok(msg) = self.chan_receiver.try_recv() {
-                match msg {
-                    ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
-                }
-            }
-
             // 1. Run all tasks in local queue
             if let Some(hdl) = self.queue_worker.pop() {
                 unsafe {
@@ -228,12 +221,19 @@ impl Processor {
 
             // 2. Get work from timer
             unsafe {
+                let mut has_waked_up_tasks = false;
+                // Wake up as many as possible
                 while let Some(coro_ptr) = self.coroutine_timer.try_awake() {
-                    self.run_with_all_local_tasks(coro_ptr);
+                    self.ready(coro_ptr);
+                    has_waked_up_tasks = true;
+                }
+
+                if has_waked_up_tasks {
+                    continue 'outerloop;
                 }
             }
 
-            // 3. Well, check if there is some work could be waked up
+            // 3. Well, check if there are any works could be waked up
             if self.io_slabs.count() != 0 {
                 // Make the borrow checker happy.
                 let proc_ptr: *mut Processor = self;
@@ -244,7 +244,7 @@ impl Processor {
                 }
 
                 if self.has_ready_tasks {
-                    continue;
+                    continue 'outerloop;
                 }
             } else if Scheduler::instance().work_count() == 0 {
                 break;
@@ -262,6 +262,13 @@ impl Processor {
                         self.run_with_all_local_tasks(hdl.0);
                     }
                     continue 'outerloop;
+                }
+            }
+
+            // 5. Check the mailbox
+            while let Ok(msg) = self.chan_receiver.try_recv() {
+                match msg {
+                    ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                 }
             }
 
