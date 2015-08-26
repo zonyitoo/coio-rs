@@ -341,10 +341,11 @@ impl Processor {
     }
 }
 
-#[cfg(any(target_os = "linux",
-          target_os = "android"))]
+
 impl Processor {
     /// Register and wait I/O
+    #[cfg(any(target_os = "linux",
+              target_os = "android"))]
     pub fn wait_event<E: Evented + AsRawFd>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert((unsafe { Processor::current().running().unwrap() },
                                                From::from(fd.as_raw_fd()))).unwrap();
@@ -357,52 +358,13 @@ impl Processor {
 
         Ok(())
     }
-}
 
-#[cfg(any(target_os = "linux",
-          target_os = "android"))]
-impl Handler for Processor {
-    type Timeout = Token;
-    type Message = ();
-
-    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
-        debug!("Got {:?} for {:?}", events, token);
-
-        match self.io_slabs.remove(token) {
-            Some((hdl, fd)) => {
-                // Linux EPoll needs to explicit EPOLL_CTL_DEL the fd
-                event_loop.deregister(&fd).unwrap();
-                mem::forget(fd);
-                unsafe {
-                    self.ready(hdl);
-                }
-            },
-            None => {
-                warn!("No coroutine is waiting on readable {:?}", token);
-            }
-        }
-    }
-
-    fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
-        match self.timer_slabs.remove(token) {
-            Some(coro_ptr) => unsafe {
-                self.ready(coro_ptr);
-            },
-            None => {
-                warn!("Timer token {:?} was awaited without waiting coroutines", token);
-            }
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos",
-          target_os = "freebsd",
-          target_os = "dragonfly",
-          target_os = "ios",
-          target_os = "bitrig",
-          target_os = "openbsd"))]
-impl Processor {
-    /// Register and wait I/O
+    #[cfg(any(target_os = "macos",
+              target_os = "freebsd",
+              target_os = "dragonfly",
+              target_os = "ios",
+              target_os = "bitrig",
+              target_os = "openbsd"))]
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
         try!(self.event_loop.register_opt(fd, token, interest,
@@ -416,16 +378,36 @@ impl Processor {
     }
 }
 
-#[cfg(any(target_os = "macos",
-          target_os = "freebsd",
-          target_os = "dragonfly",
-          target_os = "ios",
-          target_os = "bitrig",
-          target_os = "openbsd"))]
 impl Handler for Processor {
     type Timeout = Token;
     type Message = ();
 
+    #[cfg(any(target_os = "linux",
+              target_os = "android"))]
+    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
+        debug!("Got {:?} for {:?}", events, token);
+
+        match self.io_slabs.remove(token) {
+            Some((hdl, fd)) => {
+                // Linux EPoll needs to explicit EPOLL_CTL_DEL the fd
+                event_loop.deregister(&fd).unwrap();
+                mem::forget(fd);
+                unsafe {
+                    self.ready(hdl);
+                }
+            },
+            None => {
+                warn!("No coroutine is waiting on token {:?}", token);
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos",
+              target_os = "freebsd",
+              target_os = "dragonfly",
+              target_os = "ios",
+              target_os = "bitrig",
+              target_os = "openbsd"))]
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
 
@@ -436,9 +418,9 @@ impl Handler for Processor {
                 }
             },
             None => {
-                warn!("No coroutine is waiting on readable {:?}", token);
+                warn!("No coroutine is waiting on token {:?}", token);
             }
-        }
+          }
     }
 
     fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
