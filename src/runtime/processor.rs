@@ -290,7 +290,6 @@ impl Processor {
                 match self.timer_slabs.insert(coro_ptr) {
                     Ok(token) => {
                         self.event_loop.timeout_ms(token, delay).unwrap();
-                        println!("Setted with {:?}", token);
                         break;
                     },
                     Err(..) => {}
