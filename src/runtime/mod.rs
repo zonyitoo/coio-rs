@@ -22,4 +22,3 @@
 pub use self::processor::Processor;
 
 pub mod processor;
-pub mod timer;

@@ -44,12 +44,9 @@ use deque::{BufferPool, Stolen, Worker, Stealer};
 
 use rand;
 
-use chrono::NaiveDateTime;
-
 use scheduler::Scheduler;
 use coroutine::{self, Coroutine, State, Handle, SendableCoroutinePtr};
 use options::Options;
-use runtime::timer::Timer;
 
 const MAX_TOKEN_NUM: usize = 102400;
 
@@ -73,8 +70,6 @@ pub struct Processor {
     is_scheduling: bool,
     has_ready_tasks: bool,
 
-    coroutine_timer: Timer,
-
     #[cfg(any(target_os = "linux",
               target_os = "android"))]
     io_slabs: Slab<(*mut Coroutine, Io)>,
@@ -85,6 +80,8 @@ pub struct Processor {
               target_os = "bitrig",
               target_os = "openbsd"))]
     io_slabs: Slab<*mut Coroutine>,
+
+    timer_slabs: Slab<*mut Coroutine>,
 }
 
 impl Processor {
@@ -117,9 +114,9 @@ impl Processor {
             is_scheduling: false,
             has_ready_tasks: false,
 
-            coroutine_timer: Timer::new(),
-
             io_slabs: Slab::new(MAX_TOKEN_NUM),
+
+            timer_slabs: Slab::new(MAX_TOKEN_NUM),
         }
     }
 
@@ -222,21 +219,10 @@ impl Processor {
             }
 
             // 2. Get work from timer
-            unsafe {
-                let mut has_waked_up_tasks = false;
-                // Wake up as many as possible
-                while let Some(coro_ptr) = self.coroutine_timer.try_awake() {
-                    self.ready(coro_ptr);
-                    has_waked_up_tasks = true;
-                }
-
-                if has_waked_up_tasks {
-                    continue 'outerloop;
-                }
-            }
+            //    In favor of mio's timer implementation
 
             // 3. Well, check if there are any works could be waked up
-            if self.io_slabs.count() != 0 {
+            if self.io_slabs.count() != 0 || self.timer_slabs.count() != 0 {
                 // Make the borrow checker happy.
                 let proc_ptr: *mut Processor = self;
                 if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
@@ -297,10 +283,19 @@ impl Processor {
 
     /// Block the current coroutine until the specific time
     #[inline]
-    pub fn sleep_until(&mut self, target_time: NaiveDateTime) {
+    pub fn sleep_ms(&mut self, delay: u64) {
         if let Some(coro_ptr) = unsafe { self.running() } {
             // Set into the timer
-            self.coroutine_timer.wait_until(coro_ptr, target_time);
+            loop {
+                match self.timer_slabs.insert(coro_ptr) {
+                    Ok(token) => {
+                        self.event_loop.timeout_ms(token, delay).unwrap();
+                        println!("Setted with {:?}", token);
+                        break;
+                    },
+                    Err(..) => {}
+                }
+            }
 
             // Just block it, the handle has already been sent to
             // the timer.
@@ -368,7 +363,7 @@ impl Processor {
 #[cfg(any(target_os = "linux",
           target_os = "android"))]
 impl Handler for Processor {
-    type Timeout = ();
+    type Timeout = Token;
     type Message = ();
 
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
@@ -385,6 +380,17 @@ impl Handler for Processor {
             },
             None => {
                 warn!("No coroutine is waiting on readable {:?}", token);
+            }
+        }
+    }
+
+    fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
+        match self.timer_slabs.remove(token) {
+            Some(coro_ptr) => unsafe {
+                self.ready(coro_ptr);
+            },
+            None => {
+                warn!("Timer token {:?} was awaited without waiting coroutines", token);
             }
         }
     }
@@ -418,7 +424,7 @@ impl Processor {
           target_os = "bitrig",
           target_os = "openbsd"))]
 impl Handler for Processor {
-    type Timeout = ();
+    type Timeout = Token;
     type Message = ();
 
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
@@ -432,6 +438,17 @@ impl Handler for Processor {
             },
             None => {
                 warn!("No coroutine is waiting on readable {:?}", token);
+            }
+        }
+    }
+
+    fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
+        match self.timer_slabs.remove(token) {
+            Some(coro_ptr) => unsafe {
+                self.ready(coro_ptr);
+            },
+            None => {
+                warn!("Timer token {:?} was awaited without waiting coroutines", token);
             }
         }
     }

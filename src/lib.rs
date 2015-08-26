@@ -36,7 +36,6 @@ extern crate url;
 extern crate deque;
 extern crate rand;
 extern crate libc;
-extern crate chrono;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
@@ -80,12 +79,9 @@ pub fn run(threads: usize) {
 
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
-pub fn sleep_ms(ms: u32) {
-    use chrono::*;
-    let target = Local::now() + Duration::milliseconds(ms as i64);
-
+pub fn sleep_ms(ms: u64) {
     runtime::Processor::current()
-        .sleep_until(target.naive_local());
+        .sleep_ms(ms);
 }
 
 /// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.
