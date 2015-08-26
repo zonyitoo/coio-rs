@@ -15,6 +15,15 @@ fn invoke_every_ms<F>(ms: u64, f: F)
     });
 }
 
+fn invoke_after_ms<F>(ms: u64, f: F)
+    where F: FnOnce() + Send + 'static
+{
+    coio::spawn(move|| {
+        coio::sleep_ms(ms);
+        f();
+    });
+}
+
 fn main() {
     coio::spawn(|| {
         for i in 0..10 {
@@ -24,6 +33,7 @@ fn main() {
     });
 
     invoke_every_ms(1000, || println!("Purr :P"));
+    invoke_after_ms(10000, || println!("Tadaaaaaaa"));
 
     coio::run(2);
 }

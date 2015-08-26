@@ -39,11 +39,13 @@ extern crate libc;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
+pub use promise::Promise;
 
 pub mod net;
 pub mod sync;
 pub mod scheduler;
 pub mod options;
+pub mod promise;
 mod runtime;
 mod coroutine;
 

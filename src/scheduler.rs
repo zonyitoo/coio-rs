@@ -48,7 +48,7 @@ impl<T> JoinHandle<T> {
     /// Join the coroutine until it finishes.
     ///
     /// If it already finished, this method will return immediately.
-    pub fn join(&mut self) -> Result<T, Box<Any + Send + 'static>> {
+    pub fn join(&self) -> Result<T, Box<Any + Send + 'static>> {
         self.result.recv().expect("Failed to receive from the channel")
     }
 }
