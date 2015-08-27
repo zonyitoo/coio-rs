@@ -194,7 +194,7 @@ mod test {
 
     #[test]
     fn test_join_basic() {
-        let mut guard = Scheduler::spawn(|| 1);
+        let guard = Scheduler::spawn(|| 1);
         Scheduler::run(1);
 
         assert_eq!(1, guard.join().unwrap());

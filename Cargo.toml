@@ -16,19 +16,23 @@ rand = "*"
 [dependencies]
 lazy_static = "^0.1.14"
 log = "^0.3.1"
-#context = "^0.1.1"
-mio = "^0.4.1"
-bytes = "^0.2.10"
 hyper = "^0.6.8"
 url = "^0.2"
 rand = "^0.3.10"
 chrono = "^0.2.15"
-#deque = "^0.2"
 
 [dependencies.deque]
 git = "https://github.com/kinghajj/deque.git"
-rev = "1ccb41a56a63ef79a342bc45861940c22ff5edb7"
+rev = "1ccb41a56a"
 
 [dependencies.context]
 git = "https://github.com/zonyitoo/context-rs.git"
-rev = "006f390362626cac54b2ead1f12e954c47fe7129"
+rev = "006f390362"
+
+[dependencies.mio]
+git = "https://github.com/carllerche/mio.git"
+rev = "3537a6980a"
+
+[dependencies.bytes]
+git = "https://github.com/carllerche/bytes.git"
+rev = "7edb577d0a"
