@@ -289,6 +289,7 @@ impl Processor {
             loop {
                 match self.timer_slabs.insert(coro_ptr) {
                     Ok(token) => {
+                        debug!("Going to block with delay {} and {:?}", delay, token);
                         self.event_loop.timeout_ms(token, delay).unwrap();
                         break;
                     },
@@ -424,6 +425,7 @@ impl Handler for Processor {
     }
 
     fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
+        debug!("Timer waked up {:?}", token);
         match self.timer_slabs.remove(token) {
             Some(coro_ptr) => unsafe {
                 self.ready(coro_ptr);

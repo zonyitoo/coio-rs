@@ -137,7 +137,6 @@ impl<'a, H: Handler + 'static> Worker<'a, H> {
                 }
             };
 
-
             if !self.handle_expect(&req, &mut wrt) {
                 break;
             }
