@@ -80,6 +80,8 @@ pub struct Processor {
               target_os = "bitrig",
               target_os = "openbsd"))]
     io_slabs: Slab<*mut Coroutine>,
+    #[cfg(windows)]
+    io_slabs: Slab<*mut Coroutine>,
 
     timer_slabs: Slab<*mut Coroutine>,
 }
@@ -377,6 +379,19 @@ impl Processor {
 
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
+        let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
+        try!(self.event_loop.register_opt(fd, token, interest,
+                                          PollOpt::edge()|PollOpt::oneshot()));
+
+        debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
+        self.block();
+        debug!("wait_event: Waked up; token={:?}", token);
+
+        Ok(())
+    }
 }
 
 impl Handler for Processor {
@@ -421,7 +436,23 @@ impl Handler for Processor {
             None => {
                 warn!("No coroutine is waiting on token {:?}", token);
             }
-          }
+        }
+    }
+
+    #[cfg(windows)]
+    fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
+        debug!("Got {:?} for {:?}", events, token);
+
+        match self.io_slabs.remove(token) {
+            Some(hdl) => {
+                unsafe {
+                    self.ready(hdl);
+                }
+            },
+            None => {
+                warn!("No coroutine is waiting on token {:?}", token);
+            }
+        }
     }
 
     fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
