@@ -2,6 +2,9 @@
 name = "coio"
 version = "0.1.2"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
+description = "Coroutine scheduler with non-blocking I/O support"
+repository = "https://github.com/zonyitoo/coio-rs"
+keywords = ["coroutine", "fiber", "green", "green thread", "non-blocking", "io", "async"]
 
 [lib]
 name = "coio"
