@@ -23,6 +23,7 @@ hyper = "^0.6.8"
 url = "^0.2"
 rand = "^0.3.10"
 chrono = "^0.2.15"
+libc = "^0.1.10"
 
 [dependencies.deque]
 git = "https://github.com/kinghajj/deque.git"
@@ -30,7 +31,7 @@ rev = "1ccb41a56a"
 
 [dependencies.context]
 git = "https://github.com/zonyitoo/context-rs.git"
-rev = "006f390362"
+rev = "dcbe2693fa"
 
 [dependencies.mio]
 git = "https://github.com/carllerche/mio.git"

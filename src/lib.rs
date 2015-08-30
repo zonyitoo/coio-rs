@@ -22,7 +22,7 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(rt, libc, reflect_marker, box_raw, fnbox, result_expect)]
+#![feature(rt, reflect_marker, box_raw, fnbox, result_expect)]
 
 #[macro_use]
 extern crate lazy_static;
