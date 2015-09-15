@@ -21,7 +21,6 @@
 
 //! Coroutine options
 
-use std::rt;
 use std::default::Default;
 
 /// Coroutine options
@@ -30,10 +29,12 @@ pub struct Options {
     pub name: Option<String>,
 }
 
+const DEFAULT_STACK: usize = 2 * 1024 * 1024; // 2MB
+
 impl Options {
     pub fn new() -> Options {
         Options {
-            stack_size: rt::min_stack(),
+            stack_size: DEFAULT_STACK,
             name: None,
         }
     }

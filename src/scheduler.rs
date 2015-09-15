@@ -27,7 +27,6 @@ use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::default::Default;
 use std::any::Any;
-use std::rt;
 
 use deque::Stealer;
 
@@ -118,15 +117,11 @@ impl Scheduler {
         Scheduler::instance().work_counts.fetch_add(1, Ordering::SeqCst);
 
         let (tx, rx) = ::sync::mpsc::channel();
-        let wrapper = move|| unsafe {
-            let mut output = None;
-            let ret = {
-                let ptr = &mut output;
-                rt::unwind::try(move|| *ptr = Some(f()))
-            };
+        let wrapper = move|| {
+            let ret = thread::catch_panic(move|| f());
 
             // No matter whether it is panicked or not, the result will be sent to the channel
-            let _ = tx.send(ret.map(|()| output.unwrap())); // Just ignore if it failed
+            let _ = tx.send(ret); // Just ignore if it failed
         };
         Processor::current().spawn_opts(Box::new(wrapper), opts);
 
