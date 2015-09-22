@@ -116,7 +116,7 @@ impl Processor {
             is_scheduling: false,
             has_ready_tasks: false,
 
-            io_slabs: Slab::new(MAX_TOKEN_NUM),
+            io_slabs: Slab::new_starting_at(Token(1), MAX_TOKEN_NUM),
 
             timer_slabs: Slab::new(MAX_TOKEN_NUM),
         }
@@ -402,6 +402,10 @@ impl Handler for Processor {
               target_os = "android"))]
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
+        if token == Token(0) {
+            error!("Received events from Token(0): {:?}", events);
+            return;
+        }
 
         match self.io_slabs.remove(token) {
             Some((hdl, fd)) => {
@@ -426,6 +430,10 @@ impl Handler for Processor {
               target_os = "openbsd"))]
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
+        if token == Token(0) {
+            error!("Received events from Token(0): {:?}", events);
+            return;
+        }
 
         match self.io_slabs.remove(token) {
             Some(hdl) => {
@@ -442,6 +450,10 @@ impl Handler for Processor {
     #[cfg(windows)]
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
+        if token == Token(0) {
+            error!("Received events from Token(0): {:?}", events);
+            return;
+        }
 
         match self.io_slabs.remove(token) {
             Some(hdl) => {
