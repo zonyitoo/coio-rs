@@ -25,6 +25,11 @@ use std::ops::{Deref, DerefMut};
 use std::io;
 use std::net::{ToSocketAddrs, SocketAddr};
 
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
+
 use mio::EventSet;
 
 use bytes::{Buf, MutBuf, SliceBuf, MutSliceBuf};
@@ -128,5 +133,19 @@ impl Deref for UdpSocket {
 impl DerefMut for UdpSocket {
     fn deref_mut(&mut self) -> &mut ::mio::udp::UdpSocket {
         return &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for UdpSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for UdpSocket {
+    fn as_raw_fd(&self) -> RawSocket {
+        self.0.as_raw_socket()
     }
 }

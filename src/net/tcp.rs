@@ -27,6 +27,11 @@ use std::ops::{Deref, DerefMut};
 use std::convert::From;
 use std::iter::Iterator;
 
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
+
 use mio::{self, EventSet};
 
 use runtime::processor::Processor;
@@ -70,6 +75,20 @@ impl Deref for TcpSocket {
 impl DerefMut for TcpSocket {
     fn deref_mut(&mut self) -> &mut ::mio::tcp::TcpSocket {
         &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for TcpSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for TcpSocket {
+    fn as_raw_fd(&self) -> RawSocket {
+        self.0.as_raw_socket()
     }
 }
 
@@ -131,6 +150,20 @@ impl Deref for TcpListener {
 impl DerefMut for TcpListener {
     fn deref_mut(&mut self) -> &mut ::mio::tcp::TcpListener {
         &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for TcpListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for TcpListener {
+    fn as_raw_fd(&self) -> RawSocket {
+        self.0.as_raw_socket()
     }
 }
 
@@ -296,5 +329,19 @@ impl Deref for TcpStream {
 impl DerefMut for TcpStream {
     fn deref_mut(&mut self) -> &mut ::mio::tcp::TcpStream {
         &mut self.0
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for TcpStream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for TcpStream {
+    fn as_raw_fd(&self) -> RawSocket {
+        self.0.as_raw_socket()
     }
 }
