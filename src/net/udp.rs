@@ -32,8 +32,6 @@ use std::os::windows::io::{AsRawSocket, RawSocket};
 
 use mio::EventSet;
 
-use bytes::{Buf, MutBuf, SliceBuf, MutSliceBuf};
-
 use runtime::processor::Processor;
 
 pub struct UdpSocket(::mio::udp::UdpSocket);
@@ -59,24 +57,22 @@ impl UdpSocket {
         Ok(UdpSocket(try!(self.0.try_clone())))
     }
 
-    pub fn send_to<A: ToSocketAddrs>(&self, slice_buf: &[u8], target: A) -> io::Result<usize> {
-        let mut buf = SliceBuf::wrap(slice_buf);
-
+    pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
         let mut last_err = Ok(0);
         for addr in try!(target.to_socket_addrs()) {
-            match self.0.send_to(&mut buf, &addr) {
+            match self.0.send_to(buf, &addr) {
                 Ok(None) => {
                     debug!("UdpSocket send_to WOULDBLOCK");
 
                     loop {
                         try!(Processor::current().wait_event(&self.0, EventSet::writable()));
 
-                        match self.0.send_to(&mut buf, &addr) {
+                        match self.0.send_to(buf, &addr) {
                             Ok(None) => {
                                 warn!("UdpSocket send_to WOULDBLOCK");
                             },
-                            Ok(Some(..)) => {
-                                return Ok(slice_buf.len() - buf.remaining());
+                            Ok(Some(len)) => {
+                                return Ok(len);
                             },
                             Err(err) => {
                                 return Err(err);
@@ -84,8 +80,8 @@ impl UdpSocket {
                         }
                     }
                 },
-                Ok(Some(..)) => {
-                    return Ok(slice_buf.len() - buf.remaining());
+                Ok(Some(len)) => {
+                    return Ok(len);
                 },
                 Err(err) => last_err = Err(err),
             }
@@ -94,28 +90,25 @@ impl UdpSocket {
         last_err
     }
 
-    pub fn recv_from(&self, slice_buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let total_len = slice_buf.len();
-        let mut buf = MutSliceBuf::wrap(slice_buf);
-
-        match try!(self.0.recv_from(&mut buf)) {
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        match try!(self.0.recv_from(buf)) {
             None => {
                 debug!("UdpSocket recv_from WOULDBLOCK");
             },
-            Some(addr) => {
-                return Ok((total_len - buf.remaining(), addr));
+            Some(ret) => {
+                return Ok(ret);
             }
         }
 
         loop {
             try!(Processor::current().wait_event(&self.0, EventSet::readable()));
 
-            match try!(self.0.recv_from(&mut buf)) {
+            match try!(self.0.recv_from(buf)) {
                 None => {
                     warn!("UdpSocket recv_from WOULDBLOCK");
                 },
-                Some(addr) => {
-                    return Ok((total_len - buf.remaining(), addr));
+                Some(ret) => {
+                    return Ok(ret);
                 }
             }
         }

@@ -5,12 +5,10 @@ extern crate mio;
 
 extern crate coio;
 
-use std::net::SocketAddr;
-
 use clap::{Arg, App};
 
 use coio::Scheduler;
-use coio::net::tcp::TcpSocket;
+use coio::net::tcp::TcpListener;
 
 fn main() {
     env_logger::init().unwrap();
@@ -27,22 +25,15 @@ fn main() {
     let bind_addr = matches.value_of("BIND").unwrap().to_owned();
 
     Scheduler::spawn(move|| {
-        let addr = bind_addr.parse().unwrap();
-        let server = match &addr {
-            &SocketAddr::V4(..) => TcpSocket::v4(),
-            &SocketAddr::V6(..) => TcpSocket::v6(),
-        }.unwrap();
-        server.set_reuseaddr(true).unwrap();
-        server.bind(&addr).unwrap();
-        let server = server.listen(1024).unwrap();
+        let server = TcpListener::bind(&bind_addr[..]).unwrap();
 
         info!("Listening on {:?}", server.local_addr().unwrap());
 
         for stream in server.incoming() {
             use std::io::{Read, Write};
 
-            let mut stream = stream.unwrap();
-            info!("Accept connection: {:?}", stream.peer_addr().unwrap());
+            let (mut stream, addr) = stream.unwrap();
+            info!("Accept connection: {:?}", addr);
 
             Scheduler::spawn(move|| {
                 let mut buf = [0; 1024*16];
@@ -64,7 +55,7 @@ fn main() {
                     }
                 }
 
-                info!("{:?} closed", stream.peer_addr().unwrap());
+                info!("{:?} closed", addr);
             });
         }
     });

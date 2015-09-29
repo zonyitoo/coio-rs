@@ -37,62 +37,6 @@ use mio::{self, EventSet};
 use runtime::processor::Processor;
 
 #[derive(Debug)]
-pub struct TcpSocket(::mio::tcp::TcpSocket);
-
-impl TcpSocket {
-    /// Returns a new, unbound, non-blocking, IPv4 socket
-    pub fn v4() -> io::Result<TcpSocket> {
-        Ok(TcpSocket(try!(::mio::tcp::TcpSocket::v4())))
-    }
-
-    /// Returns a new, unbound, non-blocking, IPv6 socket
-    pub fn v6() -> io::Result<TcpSocket> {
-        Ok(TcpSocket(try!(::mio::tcp::TcpSocket::v6())))
-    }
-
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<(TcpStream, bool)> {
-        super::each_addr(addr, |a| {
-            match a {
-                &SocketAddr::V4(..) => try!(TcpSocket::v4()).0.connect(a),
-                &SocketAddr::V6(..) => try!(TcpSocket::v6()).0.connect(a),
-            }
-        }).map(|(stream, complete)| (TcpStream(stream), complete))
-    }
-
-    pub fn listen(self, backlog: usize) -> io::Result<TcpListener> {
-        Ok(TcpListener(try!(self.0.listen(backlog))))
-    }
-}
-
-impl Deref for TcpSocket {
-    type Target = ::mio::tcp::TcpSocket;
-
-    fn deref(&self) -> &::mio::tcp::TcpSocket {
-        &self.0
-    }
-}
-
-impl DerefMut for TcpSocket {
-    fn deref_mut(&mut self) -> &mut ::mio::tcp::TcpSocket {
-        &mut self.0
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for TcpSocket {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
-    }
-}
-
-#[cfg(windows)]
-impl AsRawSocket for TcpSocket {
-    fn as_raw_fd(&self) -> RawSocket {
-        self.0.as_raw_socket()
-    }
-}
-
-#[derive(Debug)]
 pub struct TcpListener(::mio::tcp::TcpListener);
 
 impl TcpListener {
@@ -100,13 +44,13 @@ impl TcpListener {
         super::each_addr(addr, ::mio::tcp::TcpListener::bind).map(TcpListener)
     }
 
-    pub fn accept(&self) -> io::Result<TcpStream> {
+    pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         match self.0.accept() {
             Ok(None) => {
                 debug!("accept WouldBlock; going to register into eventloop");
             },
-            Ok(Some(stream)) => {
-                return Ok(TcpStream(stream));
+            Ok(Some((stream, addr))) => {
+                return Ok((TcpStream(stream), addr));
             },
             Err(err) => {
                 return Err(err);
@@ -120,8 +64,8 @@ impl TcpListener {
                 Ok(None) => {
                     warn!("accept WouldBlock; Coroutine was awaked by readable event");
                 },
-                Ok(Some(stream)) => {
-                    return Ok(TcpStream(stream));
+                Ok(Some((stream, addr))) => {
+                    return Ok((TcpStream(stream), addr));
                 },
                 Err(err) => {
                     return Err(err);
@@ -170,9 +114,9 @@ impl AsRawSocket for TcpListener {
 pub struct Incoming<'a>(&'a TcpListener);
 
 impl<'a> Iterator for Incoming<'a> {
-    type Item = io::Result<TcpStream>;
+    type Item = io::Result<(TcpStream, SocketAddr)>;
 
-    fn next(&mut self) -> Option<io::Result<TcpStream>> {
+    fn next(&mut self) -> Option<io::Result<(TcpStream, SocketAddr)>> {
         Some(self.0.accept())
     }
 }
@@ -202,17 +146,7 @@ pub struct TcpStream(mio::tcp::TcpStream);
 
 impl TcpStream {
     pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
-        match TcpSocket::connect(addr) {
-            Ok((stream, completed)) => {
-                if !completed {
-                    try!(Processor::current().wait_event(&stream.0, EventSet::writable()));
-                    try!(stream.take_socket_error());
-                }
-
-                Ok(stream)
-            },
-            Err(err) => Err(err)
-        }
+        super::each_addr(addr, ::mio::tcp::TcpStream::connect).map(TcpStream)
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {

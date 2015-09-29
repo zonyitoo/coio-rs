@@ -352,8 +352,8 @@ impl Processor {
     pub fn wait_event<E: Evented + AsRawFd>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert((unsafe { Processor::current().running().unwrap() },
                                                From::from(fd.as_raw_fd()))).unwrap();
-        try!(self.event_loop.register_opt(fd, token, interest,
-                                          PollOpt::edge()|PollOpt::oneshot()));
+        try!(self.event_loop.register(fd, token, interest,
+                                      PollOpt::edge()|PollOpt::oneshot()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
         self.block();
@@ -370,8 +370,8 @@ impl Processor {
               target_os = "openbsd"))]
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
-        try!(self.event_loop.register_opt(fd, token, interest,
-                                          PollOpt::edge()|PollOpt::oneshot()));
+        try!(self.event_loop.register(fd, token, interest,
+                                      PollOpt::edge()|PollOpt::oneshot()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
         self.block();
@@ -383,8 +383,8 @@ impl Processor {
     #[cfg(windows)]
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
-        try!(self.event_loop.register_opt(fd, token, interest,
-                                          PollOpt::edge()|PollOpt::oneshot()));
+        try!(self.event_loop.register(fd, token, interest,
+                                      PollOpt::edge()|PollOpt::oneshot()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
         self.block();

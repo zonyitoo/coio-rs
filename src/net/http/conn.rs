@@ -55,7 +55,7 @@ impl NetworkListener for HttpListener {
 
     #[inline]
     fn accept(&mut self) -> hyper::Result<HttpStream> {
-        Ok(HttpStream(try!(self.0.accept())))
+        Ok(HttpStream(try!(self.0.accept()).0))
     }
 
     #[inline]

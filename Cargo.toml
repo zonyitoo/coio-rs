@@ -27,16 +27,12 @@ libc = "^0.1.10"
 
 [dependencies.deque]
 git = "https://github.com/kinghajj/deque.git"
-rev = "1ccb41a56a"
 
 [dependencies.context]
 git = "https://github.com/zonyitoo/context-rs.git"
-rev = "dcbe2693fa"
 
 [dependencies.mio]
 git = "https://github.com/carllerche/mio.git"
-rev = "3537a6980a"
 
 [dependencies.bytes]
 git = "https://github.com/carllerche/bytes.git"
-rev = "7edb577d0a"

@@ -21,7 +21,7 @@
 
 //! Asynchronous network library
 
-pub use self::tcp::{TcpListener, TcpStream, TcpSocket, Shutdown};
+pub use self::tcp::{TcpListener, TcpStream, Shutdown};
 pub use self::udp::UdpSocket;
 
 use std::io;
