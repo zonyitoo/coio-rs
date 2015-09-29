@@ -29,7 +29,6 @@ use std::net::{ToSocketAddrs, SocketAddr};
 
 pub mod tcp;
 pub mod udp;
-pub mod http;
 
 fn each_addr<A: ToSocketAddrs, F, T>(addr: A, mut f: F) -> io::Result<T>
     where F: FnMut(&SocketAddr) -> io::Result<T>
