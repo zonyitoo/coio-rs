@@ -118,12 +118,20 @@ impl Scheduler {
 
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move|| {
-            let ret = thread::catch_panic(move|| f());
+            let ret = unsafe { try(move|| f()) };
 
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.send(ret); // Just ignore if it failed
         };
         Processor::current().spawn_opts(Box::new(wrapper), opts);
+
+        unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
+            let mut f = Some(f);
+            let f = &mut f as *mut Option<F> as usize;
+            thread::catch_panic(move || {
+                (*(f as *mut Option<F>)).take().unwrap()()
+            })
+        }
 
         JoinHandle {
             result: rx,
