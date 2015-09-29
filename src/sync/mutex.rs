@@ -28,16 +28,18 @@ use std::marker::Reflect;
 use std::ops::{Deref, DerefMut};
 
 use scheduler::Scheduler;
+use coroutine::Coroutine;
+use runtime::processor::Processor;
 
 pub type LockResult<G> = Result<G, PoisonError<G>>;
 pub type TryLockResult<G> = Result<G, PoisonError<G>>;
-
-const POISON_RETRY_COUNT: usize = 102400;
 
 /// A mutual exclusion primitive useful for protecting shared data
 pub struct Mutex<T> {
     data: UnsafeCell<T>,
     lock: AtomicBool,
+
+    wait_list: ::std::sync::Mutex<Vec<*mut Coroutine>>,
 }
 
 impl<T> Mutex<T> {
@@ -46,20 +48,39 @@ impl<T> Mutex<T> {
         Mutex {
             data: UnsafeCell::new(data),
             lock: AtomicBool::new(false),
+
+            // Uses Mutex in the standard library
+            wait_list: ::std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// Acquires a mutex, blocking the current thread until it is able to do so.
     pub fn lock<'a>(&'a self) -> LockResult<Guard<'a, T>> {
-        for _ in 0..POISON_RETRY_COUNT {
-            if self.lock.compare_and_swap(false, true, Ordering::SeqCst) == false {
-                return Ok(Guard::new(unsafe { &mut *self.data.get() }, self));
+        // 1. Try to lock with the atomic boolean
+        while self.lock.compare_and_swap(false, true, Ordering::SeqCst) != false {
+            // 2. Get the lock of wait list
+            {
+                let mut wait_list = self.wait_list.lock().unwrap();
+
+                // 3. Try again to ensure no one is releasing the lock while we
+                //    are trying to add ourselves into the wait list
+                if self.lock.compare_and_swap(false, true, Ordering::SeqCst) == false {
+                    // 3.1 Wow, got the lock! Just return!
+                    break;
+                }
+
+                // 4. Add ourselves into the wait list
+                wait_list.push(unsafe { Processor::current().running()
+                                                .expect("A running coroutine is required!") });
             }
 
-            Scheduler::sched();
+            // 5. Yield
+            Scheduler::block();
+
+            // 6. Someone wait us up, try to get the lock again!
         }
 
-        Err(PoisonError::new(Guard::new(unsafe { &mut *self.data.get() }, self)))
+        Ok(Guard::new(unsafe { &mut *self.data.get() }, self))
     }
 
     pub fn try_lock<'a>(&'a self) -> TryLockResult<Guard<'a, T>> {
@@ -93,6 +114,15 @@ impl<'a, T: 'a> Guard<'a, T> {
 
 impl<'a, T: 'a> Drop for Guard<'a, T> {
     fn drop(&mut self) {
+        {
+            let mut wait_list = self.mutex.wait_list.lock().unwrap();
+            for coro in wait_list.drain(..) {
+                unsafe {
+                    Scheduler::ready(coro);
+                }
+            }
+        }
+
         while self.mutex.lock.compare_and_swap(true, false, Ordering::SeqCst) == true {}
     }
 }
@@ -175,6 +205,7 @@ mod test {
                     for _ in 0..10 {
                         let mut guard = num.lock().unwrap();
                         *guard += 1;
+                        Scheduler::sched();
                     }
                 });
             }

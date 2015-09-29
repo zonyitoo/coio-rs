@@ -22,7 +22,7 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(catch_panic, reflect_marker, fnbox)]
+#![feature(catch_panic, reflect_marker, fnbox, drain)]
 
 #[macro_use]
 extern crate lazy_static;
