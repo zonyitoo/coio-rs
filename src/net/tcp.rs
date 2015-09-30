@@ -21,7 +21,7 @@
 
 //! TCP
 
-use std::io;
+use std::io::{self, ErrorKind};
 use std::net::{ToSocketAddrs, SocketAddr};
 use std::ops::{Deref, DerefMut};
 use std::convert::From;
@@ -176,16 +176,26 @@ impl io::Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         use mio::TryRead;
 
-        match self.0.try_read(buf) {
-            Ok(None) => {
-                debug!("TcpStream read WouldBlock");
-            },
-            Ok(Some(len)) => {
-                debug!("TcpStream read {} bytes", len);
-                return Ok(len);
-            },
-            Err(err) => {
-                return Err(err);
+        loop {
+            match self.0.try_read(buf) {
+                Ok(None) => {
+                    debug!("TcpStream read WouldBlock");
+                    break;
+                },
+                Ok(Some(len)) => {
+                    debug!("TcpStream read {} bytes", len);
+                    return Ok(len);
+                },
+                Err(ref err) if err.kind() == ErrorKind::NotConnected => {
+                    // If the socket is still still connecting, just register it into the loop
+                    debug!("Read: Going to register event, socket is not connected");
+                    try!(Processor::current().wait_event(&self.0, EventSet::readable()));
+                    debug!("Read: Got read event");
+                    try!(self.take_socket_error());
+                },
+                Err(err) => {
+                    return Err(err);
+                }
             }
         }
 
@@ -214,16 +224,26 @@ impl io::Write for TcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         use mio::TryWrite;
 
-        match self.0.try_write(buf) {
-            Ok(None) => {
-                debug!("TcpStream write WouldBlock");
-            },
-            Ok(Some(len)) => {
-                debug!("TcpStream written {} bytes", len);
-                return Ok(len);
-            },
-            Err(err) => {
-                return Err(err)
+        loop {
+            match self.0.try_write(buf) {
+                Ok(None) => {
+                    debug!("TcpStream write WouldBlock");
+                    break;
+                },
+                Ok(Some(len)) => {
+                    debug!("TcpStream written {} bytes", len);
+                    return Ok(len);
+                },
+                Err(ref err) if err.kind() == ErrorKind::NotConnected => {
+                    // If the socket is still still connecting, just register it into the loop
+                    debug!("Write: Going to register event, socket is not connected");
+                    try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+                    debug!("Write: Got write event");
+                    try!(self.take_socket_error());
+                },
+                Err(err) => {
+                    return Err(err)
+                }
             }
         }
 
