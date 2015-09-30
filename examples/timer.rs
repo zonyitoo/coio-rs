@@ -2,6 +2,8 @@ extern crate coio;
 
 use std::sync::Arc;
 
+use coio::Scheduler;
+
 fn invoke_every_ms<F>(ms: u64, f: F)
     where F: Fn() + Sync + Send + 'static
 {
@@ -25,15 +27,16 @@ fn invoke_after_ms<F>(ms: u64, f: F)
 }
 
 fn main() {
-    coio::spawn(|| {
-        for i in 0..10 {
-            println!("Qua  {}", i);
-            coio::sleep_ms(2000);
-        }
-    });
+    Scheduler::with_workers(2)
+        .run(|| {
+            coio::spawn(|| {
+                for i in 0..10 {
+                    println!("Qua  {}", i);
+                    coio::sleep_ms(2000);
+                }
+            });
 
-    invoke_every_ms(1000, || println!("Purr :P"));
-    invoke_after_ms(10000, || println!("Tadaaaaaaa"));
-
-    coio::run(2);
+            invoke_every_ms(1000, || println!("Purr :P"));
+            invoke_after_ms(10000, || println!("Tadaaaaaaa"));
+        }).unwrap();
 }

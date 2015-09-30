@@ -24,17 +24,17 @@ git = "https://github.com/zonyitoo/coio-rs.git"
 ```rust
 extern crate coio;
 
-use coio::{run, spawn, sched};
+use coio::Scheduler;
 
 fn main() {
-    spawn(|| {
-        for _ in 0..10 {
-            println!("Heil Hydra");
-            sched();
-        }
-    });
-
-    run(1);
+    Scheduler::with_workers(1)
+        .run(|| {
+            for _ in 0..10 {
+                println!("Heil Hydra");
+                Scheduler::sched();
+            }
+        })
+        .unwrap();
 }
 ```
 
@@ -46,11 +46,11 @@ extern crate coio;
 use std::io::{Read, Write};
 
 use coio::net::TcpListener;
-use coio::{spawn, run};
+use coio::{spawn, Scheduler};
 
 fn main() {
     // Spawn a coroutine for accepting new connections
-    spawn(move|| {
+    Scheduler::with_workers(4).run(move|| {
         let acceptor = TcpListener::bind("127.0.0.1:8080").unwrap();
         println!("Waiting for connection ...");
 
@@ -83,10 +83,46 @@ fn main() {
                 println!("Client closed");
             });
         }
+    }).unwrap();
+}
+```
+
+## Exit all pending coroutines when the main function is exited.
+
+```rust
+extern crate coio;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use coio::Scheduler;
+
+fn main() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let cloned_counter = counter.clone();
+
+    let result = Scheduler::with_workers(1).run(move|| {
+        // Spawn a new coroutine
+        Scheduler::spawn(move|| {
+            struct Guard(Arc<AtomicUsize>);
+
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.store(1, Ordering::SeqCst);
+                }
+            }
+
+            let _guard = Guard(cloned_counter);
+
+            coio::sleep_ms(10_000);
+            println!("Not going to run this line");
+        });
+
+        // Exit right now, which will cause the coroutine to be destroyed.
+        panic!("Exit right now!!");
     });
 
-    // Schedule with 4 threads
-    run(4);
+    assert!(result.is_err() && counter.load(Ordering::SeqCst) == 1);
 }
 ```
 

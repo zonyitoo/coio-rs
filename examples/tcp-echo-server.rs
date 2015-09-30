@@ -24,41 +24,40 @@ fn main() {
 
     let bind_addr = matches.value_of("BIND").unwrap().to_owned();
 
-    Scheduler::spawn(move|| {
-        let server = TcpListener::bind(&bind_addr[..]).unwrap();
+    Scheduler::with_workers(matches.value_of("THREADS").unwrap_or("1").parse().unwrap())
+        .run(move|| {
+            let server = TcpListener::bind(&bind_addr[..]).unwrap();
 
-        info!("Listening on {:?}", server.local_addr().unwrap());
+            info!("Listening on {:?}", server.local_addr().unwrap());
 
-        for stream in server.incoming() {
-            use std::io::{Read, Write};
+            for stream in server.incoming() {
+                use std::io::{Read, Write};
 
-            let (mut stream, addr) = stream.unwrap();
-            info!("Accept connection: {:?}", addr);
+                let (mut stream, addr) = stream.unwrap();
+                info!("Accept connection: {:?}", addr);
 
-            Scheduler::spawn(move|| {
-                let mut buf = [0; 1024*16];
+                Scheduler::spawn(move|| {
+                    let mut buf = [0; 1024*16];
 
-                loop {
-                    debug!("Trying to Read...");
-                    match stream.read(&mut buf) {
-                        Ok(0) => {
-                            debug!("EOF received, going to close");
-                            break;
-                        },
-                        Ok(len) => {
-                            info!("Read {} bytes, echo back!", len);
-                            stream.write_all(&buf[0..len]).unwrap();
-                        },
-                        Err(err) => {
-                            panic!("Error occurs: {:?}", err);
+                    loop {
+                        debug!("Trying to Read...");
+                        match stream.read(&mut buf) {
+                            Ok(0) => {
+                                debug!("EOF received, going to close");
+                                break;
+                            },
+                            Ok(len) => {
+                                info!("Read {} bytes, echo back!", len);
+                                stream.write_all(&buf[0..len]).unwrap();
+                            },
+                            Err(err) => {
+                                panic!("Error occurs: {:?}", err);
+                            }
                         }
                     }
-                }
 
-                info!("{:?} closed", addr);
-            });
-        }
-    });
-
-    Scheduler::run(matches.value_of("THREADS").unwrap_or("1").parse().unwrap());
+                    info!("{:?} closed", addr);
+                });
+            }
+        }).unwrap();
 }

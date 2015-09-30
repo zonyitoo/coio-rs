@@ -25,14 +25,16 @@
 #![feature(catch_panic, reflect_marker, fnbox, drain)]
 
 #[macro_use]
-extern crate lazy_static;
-#[macro_use]
 extern crate log;
 extern crate context;
 extern crate mio;
 extern crate deque;
 extern crate rand;
 extern crate libc;
+#[macro_use]
+extern crate cfg_if;
+
+use std::thread;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
@@ -71,10 +73,10 @@ pub fn sched() {
 }
 
 /// Run the scheduler with threads
-#[inline(always)]
-pub fn run(threads: usize) {
-    Scheduler::run(threads)
-}
+// #[inline(always)]
+// pub fn run(threads: usize) {
+//     Scheduler::run(threads)
+// }
 
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
@@ -120,16 +122,23 @@ impl Builder {
     }
 }
 
+unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
+    let mut f = Some(f);
+    let f = &mut f as *mut Option<F> as usize;
+    thread::catch_panic(move || {
+        (*(f as *mut Option<F>)).take().unwrap()()
+    })
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn test_sleep_ms() {
-        spawn(|| {
-            sleep_ms(1000);
-        });
-
-        run(1);
+        Scheduler::with_workers(1)
+            .run(|| {
+                sleep_ms(1000);
+            }).unwrap();
     }
 }

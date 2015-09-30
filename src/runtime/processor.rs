@@ -31,7 +31,10 @@ use std::convert::From;
 use std::thread;
 use std::mem;
 use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::Arc;
 use std::boxed::FnBox;
+use std::ptr;
+use std::any::Any;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
@@ -50,15 +53,20 @@ use options::Options;
 
 const MAX_TOKEN_NUM: usize = 102400;
 
-thread_local!(static PROCESSOR: UnsafeCell<Processor> = UnsafeCell::new(Processor::new()));
+thread_local!(static PROCESSOR: UnsafeCell<*mut Processor> = UnsafeCell::new(ptr::null_mut()));
+
+#[derive(Debug)]
+pub struct ForceUnwind;
 
 /// Processing unit of a thread
 pub struct Processor {
+    scheduler: Arc<Scheduler>,
     event_loop: EventLoop<Processor>,
 
     main_coro: Handle,
     cur_running: Option<*mut Coroutine>,
     last_result: Option<coroutine::Result<State>>,
+    is_exiting: bool,
 
     queue_worker: Worker<SendableCoroutinePtr>,
     queue_stealer: Stealer<SendableCoroutinePtr>,
@@ -86,12 +94,10 @@ pub struct Processor {
     timer_slabs: Slab<*mut Coroutine>,
 }
 
-impl Processor {
-    fn new() -> Processor {
-        Processor::new_with_neighbors(Vec::new())
-    }
+unsafe impl Send for Processor {}
 
-    fn new_with_neighbors(neigh: Vec<Stealer<SendableCoroutinePtr>>) -> Processor {
+impl Processor {
+    fn new_with_neighbors(sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>) -> Processor {
         let main_coro = unsafe {
             Coroutine::empty()
         };
@@ -100,11 +106,13 @@ impl Processor {
         let (tx, rx) = mpsc::channel();
 
         Processor {
+            scheduler: sched,
             event_loop: EventLoop::new().expect("Unable to create the eventloop"),
 
             main_coro: main_coro,
             cur_running: None,
             last_result: None,
+            is_exiting: false,
 
             queue_worker: worker,
             queue_stealer: stealer,
@@ -123,20 +131,77 @@ impl Processor {
     }
 
     #[inline]
+    pub fn run_with_neighbors(sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>)
+            -> (thread::JoinHandle<()>, Sender<ProcMessage>, Stealer<SendableCoroutinePtr>) {
+        let mut p = Processor::new_with_neighbors(sched, neigh);
+        let (msg, st) = (p.handle(), p.stealer());
+        let hdl = thread::spawn(move|| {
+            // Set to thread local
+            PROCESSOR.with(|proc_ptr| unsafe {
+                *proc_ptr.get() = &mut p
+            });
+
+            if let Err(err) = p.schedule() {
+                panic!("Processor::schedule return Err: {:?}", err);
+            }
+        });
+
+        (hdl, msg, st)
+    }
+
+    #[inline]
+    pub fn run_with_fn<M, T>(sched: Arc<Scheduler>, f: M)
+            -> (thread::JoinHandle<()>,
+                Sender<ProcMessage>,
+                Stealer<SendableCoroutinePtr>,
+                ::std::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>)
+        where M: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
+    {
+        let mut p = Processor::new_with_neighbors(sched, Vec::new());
+        let (msg, st) = (p.handle(), p.stealer());
+        let (tx, rx) = ::std::sync::mpsc::channel();
+        let hdl = thread::spawn(move|| {
+            // Set to thread local
+            PROCESSOR.with(|proc_ptr| unsafe {
+                *proc_ptr.get() = &mut p
+            });
+
+            let wrapper = move|| {
+                let ret = unsafe { ::try(move|| f()) };
+
+                // No matter whether it is panicked or not, the result will be sent to the channel
+                let _ = tx.send(ret); // Just ignore if it failed
+            };
+            p.spawn_opts(Box::new(wrapper), Options::default());
+
+            if let Err(err) = p.schedule() {
+                panic!("Processor::schedule return Err: {:?}", err);
+            }
+        });
+        (hdl, msg, st, rx)
+    }
+
+    #[inline]
+    pub fn scheduler(&self) -> &Scheduler {
+        &*self.scheduler
+    }
+
+    #[inline]
     // Get the current running coroutine
     pub unsafe fn running(&mut self) -> Option<*mut Coroutine> {
         self.cur_running
     }
 
-    #[inline]
-    pub fn set_neighbors(&mut self, neigh: Vec<Stealer<SendableCoroutinePtr>>) {
-        self.neighbor_stealers = neigh;
-    }
+    // #[inline]
+    // pub fn set_neighbors(&mut self, neigh: Vec<Stealer<SendableCoroutinePtr>>) {
+    //     self.neighbor_stealers = neigh;
+    // }
 
     /// Get the thread local processor
     #[inline]
     pub fn current() -> &'static mut Processor {
-        PROCESSOR.with(|p| unsafe { &mut *p.get() })
+        PROCESSOR.with(|p| unsafe { &mut **p.get() })
     }
 
     #[inline]
@@ -206,7 +271,7 @@ impl Processor {
     }
 
     /// Run the processor
-    pub fn schedule(&mut self) -> io::Result<()> {
+    fn schedule(&mut self) -> io::Result<()> {
         self.is_scheduling = true;
 
         'outerloop:
@@ -236,9 +301,11 @@ impl Processor {
                 if self.has_ready_tasks {
                     continue 'outerloop;
                 }
-            } else if Scheduler::instance().work_count() == 0 {
-                break;
-            } else {
+            }
+            // } else if Scheduler::instance().work_count() == 0 {
+            //     break;
+            // } else {
+            else {
                 // We don't have active tasks in the local queue
                 // And we don't have any activated tasks from event loop
             }
@@ -259,6 +326,11 @@ impl Processor {
             while let Ok(msg) = self.chan_receiver.try_recv() {
                 match msg {
                     ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
+                    ProcMessage::Shutdown => {
+                        self.destroy_all_coroutines();
+
+                        break 'outerloop;
+                    }
                 }
             }
 
@@ -268,6 +340,69 @@ impl Processor {
         self.is_scheduling = false;
 
         Ok(())
+    }
+
+    #[cfg(any(target_os = "linux",
+              target_os = "android"))]
+    fn destroy_all_coroutines(&mut self) {
+        self.is_exiting = true;
+
+        // 1. Drain the work queue.
+        if let Some(hdl) = self.queue_worker.pop() {
+            unsafe {
+                self.run_with_all_local_tasks(hdl.0);
+            }
+        }
+
+        // 2. Drain I/O Slab
+        let io_hdls: Vec<*mut Coroutine> = self.io_slabs.iter().map(|x| x.0).collect();
+        for hdl in io_hdls {
+            let _ = self.resume(hdl);
+            unsafe {
+                Scheduler::finished(hdl);
+            }
+        }
+
+        // 3. Drain timer Slab
+        let timer_hdls: Vec<*mut Coroutine> = self.timer_slabs.iter().map(|x| *x).collect();
+        for hdl in timer_hdls {
+            let _ = self.resume(hdl);
+            unsafe {
+                Scheduler::finished(hdl);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux",
+                  target_os = "android")))]
+    fn destroy_all_coroutines(&mut self) {
+        // Not epoll
+        self.is_exiting = true;
+
+        // 1. Drain the work queue.
+        if let Some(hdl) = self.queue_worker.pop() {
+            unsafe {
+                self.run_with_all_local_tasks(hdl.0);
+            }
+        }
+
+        // 2. Drain I/O Slab
+        let io_hdls: Vec<*mut Coroutine> = self.io_slabs.iter().map(|x| *x).collect();
+        for hdl in io_hdls {
+            let _ = self.resume(hdl);
+            unsafe {
+                Scheduler::finished(hdl);
+            }
+        }
+
+        // 3. Drain timer Slab
+        let timer_hdls: Vec<*mut Coroutine> = self.timer_slabs.iter().map(|x| *x).collect();
+        for hdl in timer_hdls {
+            let _ = self.resume(hdl);
+            unsafe {
+                Scheduler::finished(hdl);
+            }
+        }
     }
 
     #[inline]
@@ -317,6 +452,12 @@ impl Processor {
                 (&mut *coro_ptr).yield_to(&*self.main_coro)
             }
         }
+
+        // We are back!
+        // Exit right now!
+        if self.is_exiting {
+            panic!(ForceUnwind);
+        }
     }
 
     /// Block the current running coroutine, equivalent to `Scheduler::block`
@@ -328,6 +469,12 @@ impl Processor {
                 self.set_last_result(Ok(State::Blocked));
                 (&mut *coro_ptr).yield_to(&*self.main_coro)
             }
+        }
+
+        // We are back!
+        // Exit right now!
+        if self.is_exiting {
+            panic!(ForceUnwind);
         }
     }
 
@@ -482,4 +629,5 @@ impl Handler for Processor {
 
 pub enum ProcMessage {
     NewNeighbor(Stealer<SendableCoroutinePtr>),
+    Shutdown,
 }

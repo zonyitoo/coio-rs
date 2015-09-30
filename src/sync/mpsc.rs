@@ -126,16 +126,16 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 mod test {
     use super::*;
 
-    use {spawn, run};
+    use scheduler::Scheduler;
 
     #[test]
     fn test_channel_basic() {
         let (tx, rx) = channel();
-        spawn(move|| {
-            tx.send(1).unwrap();
-        });
 
-        run(1);
+        Scheduler::with_workers(1)
+            .run(move|| {
+                tx.send(1).unwrap();
+            }).unwrap();
 
         assert_eq!(1, rx.recv().unwrap());
     }

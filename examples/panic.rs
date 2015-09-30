@@ -3,11 +3,12 @@ extern crate coio;
 use coio::Scheduler;
 
 fn main() {
-    let handle = Scheduler::spawn(|| {
-        panic!("Panicked inside");
-    });
+    Scheduler::with_workers(1)
+        .run(|| {
+            let handle = Scheduler::spawn(|| {
+                panic!("Panicked inside");
+            });
 
-    Scheduler::run(1);
-
-    assert!(handle.join().is_err());
+            assert!(handle.join().is_err());
+        }).unwrap();
 }

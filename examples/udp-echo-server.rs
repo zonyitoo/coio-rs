@@ -26,21 +26,20 @@ fn main() {
 
     let bind_addr = matches.value_of("BIND").unwrap().to_owned();
 
-    Scheduler::spawn(move|| {
-        let addr: SocketAddr = bind_addr.parse().unwrap();
-        let server = UdpSocket::bind(&addr).unwrap();
+    Scheduler::with_workers(matches.value_of("THREADS").unwrap_or("1").parse().unwrap())
+        .run(move|| {
+            let addr: SocketAddr = bind_addr.parse().unwrap();
+            let server = UdpSocket::bind(&addr).unwrap();
 
-        info!("Listening on {:?}", server.local_addr().unwrap());
+            info!("Listening on {:?}", server.local_addr().unwrap());
 
-        let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 1024];
 
-        loop {
-            let (len, peer_addr) = server.recv_from(&mut buf).unwrap();
-            info!("Accept connection: {:?}", peer_addr);
+            loop {
+                let (len, peer_addr) = server.recv_from(&mut buf).unwrap();
+                info!("Accept connection: {:?}", peer_addr);
 
-            server.send_to(&mut buf[..len], &peer_addr).unwrap();
-        }
-    });
-
-    Scheduler::run(matches.value_of("THREADS").unwrap_or("1").parse().unwrap());
+                server.send_to(&mut buf[..len], &peer_addr).unwrap();
+            }
+        }).unwrap();
 }

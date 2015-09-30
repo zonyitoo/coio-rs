@@ -21,9 +21,8 @@
 
 //! Global coroutine scheduler
 
-use std::thread;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 use std::default::Default;
 use std::any::Any;
@@ -33,10 +32,6 @@ use deque::Stealer;
 use runtime::processor::{Processor, ProcMessage};
 use coroutine::{Coroutine, SendableCoroutinePtr};
 use options::Options;
-
-lazy_static! {
-    static ref SCHEDULER: Scheduler = Scheduler::new();
-}
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
@@ -58,23 +53,26 @@ unsafe impl<T: Send> Send for JoinHandle<T> {}
 pub struct Scheduler {
     work_counts: AtomicUsize,
     proc_handles: Mutex<Vec<(Sender<ProcMessage>, Stealer<SendableCoroutinePtr>)>>,
+    expected_worker_count: usize,
 }
 
 unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
-    fn new() -> Scheduler {
+    pub fn with_workers(workers: usize) -> Scheduler {
+        assert!(workers >= 1, "Must have at least one worker");
         Scheduler {
             work_counts: AtomicUsize::new(0),
             proc_handles: Mutex::new(Vec::new()),
+            expected_worker_count: workers,
         }
     }
 
     /// Get the global Scheduler
     #[inline]
     pub fn instance() -> &'static Scheduler {
-        &SCHEDULER
+        Processor::current().scheduler()
     }
 
     /// A coroutine is ready for schedule
@@ -118,67 +116,63 @@ impl Scheduler {
 
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move|| {
-            let ret = unsafe { try(move|| f()) };
+            let ret = unsafe { ::try(move|| f()) };
 
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.send(ret); // Just ignore if it failed
         };
         Processor::current().spawn_opts(Box::new(wrapper), opts);
 
-        unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
-            let mut f = Some(f);
-            let f = &mut f as *mut Option<F> as usize;
-            thread::catch_panic(move || {
-                (*(f as *mut Option<F>)).take().unwrap()()
-            })
-        }
-
         JoinHandle {
             result: rx,
         }
     }
 
-    /// Run the scheduler with `n` threads
-    pub fn run(n: usize) {
-        assert!(n >= 1, "There must be at least 1 thread");
-        Scheduler::instance().proc_handles.lock().unwrap().clear();
+    /// Run the scheduler
+    pub fn run<M, R>(self, main_fn: M) -> Result<R, Box<Any + Send + 'static>>
+        where M: FnOnce() -> R + Send + 'static,
+              R: Send + 'static
+    {
+        let the_sched = Arc::new(self);
+        let mut handles = Vec::new();
+        let main_coro_hdl = {
+            // The first worker
+            let mut proc_handles = the_sched.proc_handles.lock().unwrap();
+            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(the_sched.clone(), main_fn);
+            handles.push(hdl);
+            proc_handles.push((msg, st));
+            main_hdl
+        };
 
-        fn do_work() {
-            {
-                let mut guard = Scheduler::instance().proc_handles.lock().unwrap();
-                Processor::current().set_neighbors(guard.iter().map(|x| x.1.clone()).collect());
+        // The others
+        for _ in 1..the_sched.expected_worker_count {
+            let mut proc_handles = the_sched.proc_handles.lock().unwrap();
+            let (hdl, msg, st) = Processor::run_with_neighbors(the_sched.clone(),
+                                                               proc_handles.iter().map(|x| x.1.clone()).collect());
 
-                let hdl = Processor::current().handle();
-                let stealer = Processor::current().stealer();
-                for neigh in guard.iter() {
-                    let &(ref sender, _) = neigh;
-                    if let Err(err) = sender.send(ProcMessage::NewNeighbor(stealer.clone())) {
-                        error!("Error while sending NewNeighbor {:?}", err);
-                    }
+            for &(ref msg, _) in proc_handles.iter() {
+                if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
+                    error!("Error while sending NewNeighbor {:?}", err);
                 }
-
-                guard.push((hdl, stealer));
             }
 
-            match Processor::current().schedule() {
-                Ok(..) => {},
-                Err(err) => panic!("Processor schedule error: {:?}", err),
-            }
+            handles.push(hdl);
+            proc_handles.push((msg, st));
         }
 
-        let mut futs = Vec::new();
-        for _ in 1..n {
-            let fut = thread::spawn(do_work);
-
-            futs.push(fut);
+        let main_ret = main_coro_hdl.recv().unwrap();
+        // TODO: Ask all workers to exit!
+        for &(ref msg, _) in the_sched.proc_handles.lock().unwrap().iter() {
+            let _ = msg.send(ProcMessage::Shutdown);
         }
 
-        do_work();
-
-        for fut in futs.into_iter() {
-            fut.join().unwrap();
+        for hdl in handles {
+            hdl.join().unwrap();
         }
+
+        main_ret
     }
+
 
     /// Suspend the current coroutine
     pub fn sched() {
@@ -197,9 +191,10 @@ mod test {
 
     #[test]
     fn test_join_basic() {
-        let guard = Scheduler::spawn(|| 1);
-        Scheduler::run(1);
+        Scheduler::with_workers(1).run(|| {
+            let guard = Scheduler::spawn(|| 1);
 
-        assert_eq!(1, guard.join().unwrap());
+            assert_eq!(1, guard.join().unwrap());
+        }).unwrap();
     }
 }

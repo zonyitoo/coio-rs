@@ -198,20 +198,26 @@ mod test {
         let num = Arc::new(Mutex::new(0));
 
         let num_cloned = num.clone();
-        Scheduler::spawn(move|| {
-            for _ in 0..100 {
-                let num = num_cloned.clone();
-                Scheduler::spawn(move|| {
-                    for _ in 0..10 {
-                        let mut guard = num.lock().unwrap();
-                        *guard += 1;
-                        Scheduler::sched();
-                    }
-                });
-            }
-        });
+        Scheduler::with_workers(10)
+            .run(move|| {
+                let mut handlers = Vec::new();
 
-        Scheduler::run(10);
+                for _ in 0..100 {
+                    let num = num_cloned.clone();
+                    let hdl = Scheduler::spawn(move|| {
+                        for _ in 0..10 {
+                            let mut guard = num.lock().unwrap();
+                            *guard += 1;
+                            Scheduler::sched();
+                        }
+                    });
+                    handlers.push(hdl);
+                }
+
+                for hdl in handlers {
+                    hdl.join().unwrap();
+                }
+            }).unwrap();
 
         assert_eq!(*num.lock().unwrap(), 1000);
     }
