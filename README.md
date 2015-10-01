@@ -55,9 +55,9 @@ fn main() {
         println!("Waiting for connection ...");
 
         for stream in acceptor.incoming() {
-            let mut stream = stream.unwrap();
+            let (mut stream, addr) = stream.unwrap();
 
-            println!("Got connection from {:?}", stream.peer_addr().unwrap());
+            println!("Got connection from {:?}", addr);
 
             // Spawn a new coroutine to handle the connection
             spawn(move|| {
@@ -87,7 +87,9 @@ fn main() {
 }
 ```
 
-## Exit all pending coroutines when the main function is exited.
+## Exit the main function
+
+Will cause all pending coroutine to be killed.
 
 ```rust
 extern crate coio;
