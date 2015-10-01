@@ -20,9 +20,7 @@ log = "^0.3.1"
 rand = "^0.3.10"
 chrono = "^0.2.15"
 libc = "^0.1.10"
-
-[dependencies.deque]
-git = "https://github.com/kinghajj/deque.git"
+deque = "^0.2.3"
 
 [dependencies.context]
 git = "https://github.com/zonyitoo/context-rs.git"
