@@ -3,7 +3,7 @@ extern crate coio;
 use coio::Scheduler;
 
 fn main() {
-    Scheduler::with_workers(1)
+    Scheduler::new()
         .run(|| {
             for _ in 0..10 {
                 println!("Heil Hydra");

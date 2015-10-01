@@ -134,7 +134,7 @@ mod test {
 
     #[test]
     fn test_sleep_ms() {
-        Scheduler::with_workers(1)
+        Scheduler::new()
             .run(|| {
                 sleep_ms(1000);
             }).unwrap();

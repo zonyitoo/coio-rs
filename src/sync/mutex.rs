@@ -198,7 +198,7 @@ mod test {
         let num = Arc::new(Mutex::new(0));
 
         let num_cloned = num.clone();
-        Scheduler::with_workers(10)
+        Scheduler::new().with_workers(10)
             .run(move|| {
                 let mut handlers = Vec::new();
 

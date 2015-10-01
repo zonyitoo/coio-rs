@@ -27,7 +27,7 @@ fn invoke_after_ms<F>(ms: u64, f: F)
 }
 
 fn main() {
-    Scheduler::with_workers(2)
+    Scheduler::new().with_workers(2)
         .run(|| {
             coio::spawn(|| {
                 for i in 0..10 {

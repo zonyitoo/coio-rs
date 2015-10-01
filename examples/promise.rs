@@ -4,8 +4,7 @@ use coio::promise::Promise;
 use coio::Scheduler;
 
 fn main() {
-    Scheduler::with_workers(4)
-        .run(|| {
+    Scheduler::new().with_workers(4).run(|| {
         coio::spawn(|| {
             let r = Promise::spawn(|| {
                 if true {

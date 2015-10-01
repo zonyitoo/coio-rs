@@ -26,7 +26,7 @@ fn main() {
 
     let bind_addr = matches.value_of("BIND").unwrap().to_owned();
 
-    Scheduler::with_workers(matches.value_of("THREADS").unwrap_or("1").parse().unwrap())
+    Scheduler::new().with_workers(matches.value_of("THREADS").unwrap_or("1").parse().unwrap())
         .run(move|| {
             let addr: SocketAddr = bind_addr.parse().unwrap();
             let server = UdpSocket::bind(&addr).unwrap();

@@ -27,7 +27,7 @@ extern crate coio;
 use coio::Scheduler;
 
 fn main() {
-    Scheduler::with_workers(1)
+    Scheduler::new()
         .run(|| {
             for _ in 0..10 {
                 println!("Heil Hydra");
@@ -50,7 +50,7 @@ use coio::{spawn, Scheduler};
 
 fn main() {
     // Spawn a coroutine for accepting new connections
-    Scheduler::with_workers(4).run(move|| {
+    Scheduler::new().with_workers(4).run(move|| {
         let acceptor = TcpListener::bind("127.0.0.1:8080").unwrap();
         println!("Waiting for connection ...");
 
@@ -103,7 +103,7 @@ fn main() {
     let counter = Arc::new(AtomicUsize::new(0));
     let cloned_counter = counter.clone();
 
-    let result = Scheduler::with_workers(1).run(move|| {
+    let result = Scheduler::new().run(move|| {
         // Spawn a new coroutine
         Scheduler::spawn(move|| {
             struct Guard(Arc<AtomicUsize>);

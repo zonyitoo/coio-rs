@@ -60,13 +60,18 @@ unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
-    pub fn with_workers(workers: usize) -> Scheduler {
-        assert!(workers >= 1, "Must have at least one worker");
+    pub fn new() -> Scheduler {
         Scheduler {
             work_counts: AtomicUsize::new(0),
             proc_handles: Mutex::new(Vec::new()),
-            expected_worker_count: workers,
+            expected_worker_count: 1,
         }
+    }
+
+    pub fn with_workers(mut self, workers: usize) -> Scheduler {
+        assert!(workers >= 1, "Must have at least one worker");
+        self.expected_worker_count = workers;
+        self
     }
 
     /// Get the global Scheduler
@@ -191,7 +196,7 @@ mod test {
 
     #[test]
     fn test_join_basic() {
-        Scheduler::with_workers(1).run(|| {
+        Scheduler::new().run(|| {
             let guard = Scheduler::spawn(|| 1);
 
             assert_eq!(1, guard.join().unwrap());

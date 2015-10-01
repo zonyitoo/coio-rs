@@ -132,7 +132,7 @@ mod test {
     fn test_channel_basic() {
         let (tx, rx) = channel();
 
-        Scheduler::with_workers(1)
+        Scheduler::new()
             .run(move|| {
                 tx.send(1).unwrap();
             }).unwrap();
