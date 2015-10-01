@@ -31,8 +31,6 @@ extern crate mio;
 extern crate deque;
 extern crate rand;
 extern crate libc;
-#[macro_use]
-extern crate cfg_if;
 
 use std::thread;
 

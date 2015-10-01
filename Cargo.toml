@@ -20,7 +20,6 @@ log = "^0.3.1"
 rand = "^0.3.10"
 chrono = "^0.2.15"
 libc = "^0.1.10"
-cfg-if = "^0.1.0"
 
 [dependencies.deque]
 git = "https://github.com/kinghajj/deque.git"
