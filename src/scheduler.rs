@@ -145,16 +145,17 @@ impl Scheduler {
         let main_coro_hdl = {
             // The first worker
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
-            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(the_sched.clone(), main_fn);
+            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(format!("Worker 0"), the_sched.clone(), main_fn);
             handles.push(hdl);
             proc_handles.push((msg, st));
             main_hdl
         };
 
         // The others
-        for _ in 1..the_sched.expected_worker_count {
+        for tid in 1..the_sched.expected_worker_count {
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
-            let (hdl, msg, st) = Processor::run_with_neighbors(the_sched.clone(),
+            let (hdl, msg, st) = Processor::run_with_neighbors(format!("Worker {}", tid),
+                                                               the_sched.clone(),
                                                                proc_handles.iter().map(|x| x.1.clone()).collect());
 
             for &(ref msg, _) in proc_handles.iter() {

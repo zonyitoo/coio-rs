@@ -28,7 +28,7 @@ use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::convert::From;
 // use std::sync::Arc;
-use std::thread;
+use std::thread::{self, Builder};
 use std::mem;
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::Arc;
@@ -131,11 +131,11 @@ impl Processor {
     }
 
     #[inline]
-    pub fn run_with_neighbors(sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>)
+    pub fn run_with_neighbors(name: String, sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>)
             -> (thread::JoinHandle<()>, Sender<ProcMessage>, Stealer<SendableCoroutinePtr>) {
         let mut p = Processor::new_with_neighbors(sched, neigh);
         let (msg, st) = (p.handle(), p.stealer());
-        let hdl = thread::spawn(move|| {
+        let hdl = Builder::new().name(name).spawn(move|| {
             // Set to thread local
             PROCESSOR.with(|proc_ptr| unsafe {
                 *proc_ptr.get() = &mut p
@@ -144,13 +144,13 @@ impl Processor {
             if let Err(err) = p.schedule() {
                 panic!("Processor::schedule return Err: {:?}", err);
             }
-        });
+        }).unwrap();
 
         (hdl, msg, st)
     }
 
     #[inline]
-    pub fn run_with_fn<M, T>(sched: Arc<Scheduler>, f: M)
+    pub fn run_with_fn<M, T>(name: String, sched: Arc<Scheduler>, f: M)
             -> (thread::JoinHandle<()>,
                 Sender<ProcMessage>,
                 Stealer<SendableCoroutinePtr>,
@@ -161,7 +161,7 @@ impl Processor {
         let mut p = Processor::new_with_neighbors(sched, Vec::new());
         let (msg, st) = (p.handle(), p.stealer());
         let (tx, rx) = ::std::sync::mpsc::channel();
-        let hdl = thread::spawn(move|| {
+        let hdl = Builder::new().name(name).spawn(move|| {
             // Set to thread local
             PROCESSOR.with(|proc_ptr| unsafe {
                 *proc_ptr.get() = &mut p
@@ -178,7 +178,7 @@ impl Processor {
             if let Err(err) = p.schedule() {
                 panic!("Processor::schedule return Err: {:?}", err);
             }
-        });
+        }).unwrap();
         (hdl, msg, st, rx)
     }
 
