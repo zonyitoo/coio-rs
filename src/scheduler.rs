@@ -100,11 +100,13 @@ impl Scheduler {
     }
 
     /// Total works
+    #[inline]
     pub fn work_count(&self) -> usize {
-        Scheduler::instance().work_counts.load(Ordering::SeqCst)
+        self.work_counts.load(Ordering::SeqCst)
     }
 
     /// Spawn a new coroutine
+    #[inline]
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
@@ -180,11 +182,13 @@ impl Scheduler {
 
 
     /// Suspend the current coroutine
+    #[inline]
     pub fn sched() {
         Processor::current().sched();
     }
 
     /// Block the current coroutine
+    #[inline]
     pub fn block() {
         Processor::current().block();
     }
