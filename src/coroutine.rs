@@ -62,14 +62,13 @@ impl Coroutine {
         })
     }
 
-    pub fn spawn_opts<F>(f: Box<F>, opts: Options) -> Handle
-        where F: FnBox() + 'static
-    {
+    pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
         let mut stack = STACK_POOL.with(|pool| unsafe {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
 
-        let ctx = Context::new(coroutine_initialize, 0, f, &mut stack);
+        let ctx = Context::new(coroutine_initialize, 0,
+                               Box::into_raw(Box::new(f)) as *mut libc::c_void, &mut stack);
         Box::new(Coroutine {
             context: ctx,
             stack: Some(stack),
