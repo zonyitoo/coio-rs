@@ -32,7 +32,7 @@ impl EchoConn {
         EchoConn {
             sock: sock,
             buf: None,
-            mut_buf: Some(ByteBuf::mut_with_capacity(2048)),
+            mut_buf: Some(ByteBuf::mut_with_capacity(1024*16)),
             token: None,
             interest: EventSet::hup()
         }
@@ -93,7 +93,7 @@ impl EchoConn {
         };
 
         try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest,
-                                   PollOpt::edge()));
+                                   PollOpt::level()));
         Ok(true)
     }
 }
@@ -115,7 +115,7 @@ impl EchoServer {
         // Register the connection
         self.conns[tok].token = Some(tok);
         event_loop.register(&self.conns[tok].sock, tok, EventSet::readable(),
-                                PollOpt::edge() | PollOpt::oneshot())
+                            PollOpt::level())
             .ok().expect("could not register socket with event loop");
 
         Ok(())
