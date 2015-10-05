@@ -6,7 +6,7 @@
 
 * TCP Echo Server, plain MIO with single thread (`mio-tcp-echo-server.rs`)
 
-* TCP Echo Server, standard Go implementation (`go-tcp-echo-server.rs`)
+* TCP Echo Server, standard Go implementation (`go-tcp-echo-server.go`)
 
 ## OS X
 
@@ -36,7 +36,7 @@
 
     - `cargo run --bin mio-tcp-echo-server --release -- --bind 127.0.0.1:3000`
 
-    - `GOMAXPROCS=4 go run go-tcp-echo-server.go`
+    - `GOMAXPROCS=4 go run src/go-tcp-echo-server.go`
 
 * Run bench client with
 
