@@ -130,23 +130,4 @@ fn main() {
 
 ## Basic Benchmarks
 
-Run the `tcp-echo-server` in the example with 4 threads:
-
-```
-Benchmarking: 127.0.0.1:8000
-128 clients, running 26 bytes, 30 sec.
-
-Speed: 71344 request/sec, 71344 response/sec
-Requests: 2140348
-```
-
-Run the sample TCP server in Go 1.5 with `GOMAXPROCS=4`:
-
-```
-Benchmarking: 127.0.0.1:8000
-128 clients, running 26 bytes, 30 sec.
-
-Speed: 70789 request/sec, 70789 response/sec
-Requests: 2123691
-Responses: 2123691
-```
+See `benchmarks` for more details.
