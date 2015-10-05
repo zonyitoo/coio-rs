@@ -122,17 +122,15 @@ impl Scheduler {
         Scheduler::instance().work_counts.fetch_add(1, Ordering::SeqCst);
 
         let (tx, rx) = ::sync::mpsc::channel();
-        let wrapper = move|| {
-            let ret = unsafe { ::try(move|| f()) };
+        let wrapper = move || {
+            let ret = unsafe { ::try(move || f()) };
 
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.send(ret); // Just ignore if it failed
         };
         Processor::current().spawn_opts(Box::new(wrapper), opts);
 
-        JoinHandle {
-            result: rx,
-        }
+        JoinHandle { result: rx }
     }
 
     /// Run the scheduler
@@ -145,7 +143,9 @@ impl Scheduler {
         let main_coro_hdl = {
             // The first worker
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
-            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(format!("Worker 0"), the_sched.clone(), main_fn);
+            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(format!("Worker 0"),
+                                                                  the_sched.clone(),
+                                                                  main_fn);
             handles.push(hdl);
             proc_handles.push((msg, st));
             main_hdl
@@ -156,7 +156,9 @@ impl Scheduler {
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
             let (hdl, msg, st) = Processor::run_with_neighbors(format!("Worker {}", tid),
                                                                the_sched.clone(),
-                                                               proc_handles.iter().map(|x| x.1.clone()).collect());
+                                                               proc_handles.iter()
+                                                                           .map(|x| x.1.clone())
+                                                                           .collect());
 
             for &(ref msg, _) in proc_handles.iter() {
                 if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
@@ -201,10 +203,12 @@ mod test {
 
     #[test]
     fn test_join_basic() {
-        Scheduler::new().run(|| {
-            let guard = Scheduler::spawn(|| 1);
+        Scheduler::new()
+            .run(|| {
+                let guard = Scheduler::spawn(|| 1);
 
-            assert_eq!(1, guard.join().unwrap());
-        }).unwrap();
+                assert_eq!(1, guard.join().unwrap());
+            })
+            .unwrap();
     }
 }

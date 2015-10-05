@@ -66,8 +66,10 @@ impl Coroutine {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
 
-        let ctx = Context::new(coroutine_initialize, 0,
-                               Box::into_raw(Box::new(f)) as *mut libc::c_void, &mut stack);
+        let ctx = Context::new(coroutine_initialize,
+                               0,
+                               Box::into_raw(Box::new(f)) as *mut libc::c_void,
+                               &mut stack);
         Box::new(Coroutine {
             context: ctx,
             stack: Some(stack),
@@ -82,7 +84,7 @@ impl Coroutine {
 impl Drop for Coroutine {
     fn drop(&mut self) {
         match self.stack.take() {
-            None => {},
+            None => {}
             Some(st) => {
                 STACK_POOL.with(|pool| unsafe {
                     let pool: &mut StackPool = &mut *pool.get();

@@ -48,9 +48,7 @@ impl UdpSocket {
     }
 
     pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
-        super::each_addr(addr, |a| {
-            ::mio::udp::UdpSocket::bound(&a)
-        }).map(UdpSocket)
+        super::each_addr(addr, |a| ::mio::udp::UdpSocket::bound(&a)).map(UdpSocket)
     }
 
     pub fn try_clone(&self) -> io::Result<UdpSocket> {
@@ -70,19 +68,19 @@ impl UdpSocket {
                         match self.0.send_to(buf, &addr) {
                             Ok(None) => {
                                 warn!("UdpSocket send_to WOULDBLOCK");
-                            },
+                            }
                             Ok(Some(len)) => {
                                 return Ok(len);
-                            },
+                            }
                             Err(err) => {
                                 return Err(err);
                             }
                         }
                     }
-                },
+                }
                 Ok(Some(len)) => {
                     return Ok(len);
-                },
+                }
                 Err(err) => last_err = Err(err),
             }
         }
@@ -94,7 +92,7 @@ impl UdpSocket {
         match try!(self.0.recv_from(buf)) {
             None => {
                 debug!("UdpSocket recv_from WOULDBLOCK");
-            },
+            }
             Some(ret) => {
                 return Ok(ret);
             }
@@ -106,7 +104,7 @@ impl UdpSocket {
             match try!(self.0.recv_from(buf)) {
                 None => {
                     warn!("UdpSocket recv_from WOULDBLOCK");
-                },
+                }
                 Some(ret) => {
                     return Ok(ret);
                 }

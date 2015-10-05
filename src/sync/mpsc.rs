@@ -53,8 +53,8 @@ impl<T> Sender<T> {
                     }
                 }
                 Ok(())
-            },
-            Err(err) => Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -75,7 +75,7 @@ impl<T> Receiver<T> {
             // 1. Try receive
             match self.try_recv() {
                 Ok(v) => return Ok(v),
-                Err(TryRecvError::Empty) => {},
+                Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
 
@@ -87,13 +87,14 @@ impl<T> Receiver<T> {
                 //    we are locking the wait list
                 match self.try_recv() {
                     Ok(v) => return Ok(v),
-                    Err(TryRecvError::Empty) => {},
+                    Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => return Err(RecvError),
                 }
 
                 // 4. Push ourselves into the wait list
-                wait_list.push_back(unsafe { Processor::current().running()
-                                                .expect("A running coroutine is required!") });
+                wait_list.push_back(unsafe {
+                    Processor::current().running().expect("A running coroutine is required!")
+                });
 
                 // 5. Release the wait list
             }
@@ -133,9 +134,10 @@ mod test {
         let (tx, rx) = channel();
 
         Scheduler::new()
-            .run(move|| {
+            .run(move || {
                 tx.send(1).unwrap();
-            }).unwrap();
+            })
+            .unwrap();
 
         assert_eq!(1, rx.recv().unwrap());
     }

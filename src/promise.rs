@@ -40,18 +40,14 @@ impl<T, E> Promise<T, E>
     pub fn spawn<F>(f: F) -> Promise<T, E>
         where F: FnOnce() -> Result<T, E> + Send + 'static
     {
-        Promise {
-            join_handle: Scheduler::spawn(f),
-        }
+        Promise { join_handle: Scheduler::spawn(f) }
     }
 
     /// Spawn a new coroutine with options to execute the task
     pub fn spawn_opts<F>(f: F, opts: Options) -> Promise<T, E>
         where F: FnOnce() -> Result<T, E> + Send + 'static
     {
-        Promise {
-            join_handle: Scheduler::spawn_opts(f, opts),
-        }
+        Promise { join_handle: Scheduler::spawn_opts(f, opts) }
     }
 
     /// Synchronize the execution with the caller and retrive the result
@@ -66,16 +62,14 @@ impl<T, E> Promise<T, E>
               FT: Send + 'static + FnOnce(T) -> Result<TT, EE>,
               FE: Send + 'static + FnOnce(E) -> Result<TT, EE>
     {
-        let join_handle = Scheduler::spawn(move|| {
+        let join_handle = Scheduler::spawn(move || {
             match self.join_handle.join().unwrap() {
                 Ok(t) => ft(t),
                 Err(e) => fe(e),
             }
         });
 
-        Promise {
-            join_handle: join_handle,
-        }
+        Promise { join_handle: join_handle }
     }
 
     /// Run the function with the result of the current task
@@ -84,13 +78,9 @@ impl<T, E> Promise<T, E>
               EE: Send + 'static,
               F: Send + 'static + FnOnce(Result<T, E>) -> Result<TT, EE>
     {
-        let join_handle = Scheduler::spawn(move|| {
-            f(self.join_handle.join().unwrap())
-        });
+        let join_handle = Scheduler::spawn(move || f(self.join_handle.join().unwrap()));
 
-        Promise {
-            join_handle: join_handle,
-        }
+        Promise { join_handle: join_handle }
     }
 
     /// Execute the function of the result is `Ok`, otherwise it will just return the value
@@ -98,41 +88,35 @@ impl<T, E> Promise<T, E>
         where TT: Send + 'static,
               F: FnOnce(T) -> Result<TT, E> + Send + 'static
     {
-        let join_handle = Scheduler::spawn(move|| {
+        let join_handle = Scheduler::spawn(move || {
             match self.join_handle.join().unwrap() {
                 Ok(t) => f(t),
                 Err(e) => Err(e),
             }
         });
 
-        Promise {
-            join_handle: join_handle,
-        }
+        Promise { join_handle: join_handle }
     }
 
     /// Execute the function of the result is `Err`, otherwise it will just return the value
     pub fn fail<F>(self, f: F) -> Promise<T, E>
         where F: Send + 'static + FnOnce(E) -> Result<T, E>
     {
-        let join_handle = Scheduler::spawn(move|| {
+        let join_handle = Scheduler::spawn(move || {
             match self.join_handle.join().unwrap() {
                 Ok(t) => Ok(t),
                 Err(e) => f(e),
             }
         });
 
-        Promise {
-            join_handle: join_handle,
-        }
+        Promise { join_handle: join_handle }
     }
 
     /// Execute the function with the result of the previous promise asynchronously
     pub fn finally<F>(self, f: F)
         where F: Send + 'static + FnOnce(Result<T, E>)
     {
-        Scheduler::spawn(move|| {
-            f(self.join_handle.join().unwrap())
-        });
+        Scheduler::spawn(move || f(self.join_handle.join().unwrap()));
     }
 
     /// Execute the function with the result of the previous promise synchronously

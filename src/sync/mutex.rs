@@ -70,8 +70,9 @@ impl<T> Mutex<T> {
                 }
 
                 // 4. Add ourselves into the wait list
-                wait_list.push(unsafe { Processor::current().running()
-                                                .expect("A running coroutine is required!") });
+                wait_list.push(unsafe {
+                    Processor::current().running().expect("A running coroutine is required!")
+                });
             }
 
             // 5. Yield
@@ -149,9 +150,7 @@ pub struct PoisonError<T> {
 
 impl<T> PoisonError<T> {
     pub fn new(guard: T) -> PoisonError<T> {
-        PoisonError {
-            guard: guard,
-        }
+        PoisonError { guard: guard }
     }
 
     pub fn into_inner(self) -> T {
@@ -198,13 +197,14 @@ mod test {
         let num = Arc::new(Mutex::new(0));
 
         let num_cloned = num.clone();
-        Scheduler::new().with_workers(10)
-            .run(move|| {
+        Scheduler::new()
+            .with_workers(10)
+            .run(move || {
                 let mut handlers = Vec::new();
 
                 for _ in 0..100 {
                     let num = num_cloned.clone();
-                    let hdl = Scheduler::spawn(move|| {
+                    let hdl = Scheduler::spawn(move || {
                         for _ in 0..10 {
                             let mut guard = num.lock().unwrap();
                             *guard += 1;
@@ -217,7 +217,8 @@ mod test {
                 for hdl in handlers {
                     hdl.join().unwrap();
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
         assert_eq!(*num.lock().unwrap(), 1000);
     }

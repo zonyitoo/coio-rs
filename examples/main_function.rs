@@ -9,9 +9,9 @@ fn main() {
     let counter = Arc::new(AtomicUsize::new(0));
     let cloned_counter = counter.clone();
 
-    let result = Scheduler::new().run(move|| {
+    let result = Scheduler::new().run(move || {
         // Spawn a new coroutine
-        Scheduler::spawn(move|| {
+        Scheduler::spawn(move || {
             struct Guard(Arc<AtomicUsize>);
 
             impl Drop for Guard {

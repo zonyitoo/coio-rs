@@ -48,10 +48,10 @@ impl TcpListener {
         match self.0.accept() {
             Ok(None) => {
                 debug!("accept WouldBlock; going to register into eventloop");
-            },
+            }
             Ok(Some((stream, addr))) => {
                 return Ok((TcpStream(stream), addr));
-            },
+            }
             Err(err) => {
                 return Err(err);
             }
@@ -63,10 +63,10 @@ impl TcpListener {
             match self.0.accept() {
                 Ok(None) => {
                     warn!("accept WouldBlock; Coroutine was awaked by readable event");
-                },
+                }
                 Ok(Some((stream, addr))) => {
                     return Ok((TcpStream(stream), addr));
-                },
+                }
                 Err(err) => {
                     return Err(err);
                 }
@@ -181,18 +181,18 @@ impl io::Read for TcpStream {
                 Ok(None) => {
                     debug!("TcpStream read WouldBlock");
                     break;
-                },
+                }
                 Ok(Some(len)) => {
                     debug!("TcpStream read {} bytes", len);
                     return Ok(len);
-                },
+                }
                 Err(ref err) if err.kind() == ErrorKind::NotConnected => {
                     // If the socket is still still connecting, just register it into the loop
                     debug!("Read: Going to register event, socket is not connected");
                     try!(Processor::current().wait_event(&self.0, EventSet::readable()));
                     debug!("Read: Got read event");
                     try!(self.take_socket_error());
-                },
+                }
                 Err(err) => {
                     return Err(err);
                 }
@@ -207,11 +207,11 @@ impl io::Read for TcpStream {
             match self.0.try_read(buf) {
                 Ok(None) => {
                     debug!("TcpStream read WouldBlock");
-                },
+                }
                 Ok(Some(len)) => {
                     debug!("TcpStream read {} bytes", len);
                     return Ok(len);
-                },
+                }
                 Err(err) => {
                     return Err(err);
                 }
@@ -229,18 +229,18 @@ impl io::Write for TcpStream {
                 Ok(None) => {
                     debug!("TcpStream write WouldBlock");
                     break;
-                },
+                }
                 Ok(Some(len)) => {
                     debug!("TcpStream written {} bytes", len);
                     return Ok(len);
-                },
+                }
                 Err(ref err) if err.kind() == ErrorKind::NotConnected => {
                     // If the socket is still still connecting, just register it into the loop
                     debug!("Write: Going to register event, socket is not connected");
                     try!(Processor::current().wait_event(&self.0, EventSet::writable()));
                     debug!("Write: Got write event");
                     try!(self.take_socket_error());
-                },
+                }
                 Err(err) => {
                     return Err(err)
                 }
@@ -255,11 +255,11 @@ impl io::Write for TcpStream {
             match self.0.try_write(buf) {
                 Ok(None) => {
                     debug!("TcpStream write WouldBlock");
-                },
+                }
                 Ok(Some(len)) => {
                     debug!("TcpStream written {} bytes", len);
                     return Ok(len);
-                },
+                }
                 Err(err) => {
                     return Err(err)
                 }
