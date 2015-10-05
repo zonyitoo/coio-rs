@@ -20,7 +20,6 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use std::cell::UnsafeCell;
-use std::mem;
 use std::boxed::FnBox;
 
 use libc;
@@ -86,7 +85,7 @@ impl Drop for Coroutine {
             None => {},
             Some(st) => {
                 STACK_POOL.with(|pool| unsafe {
-                    let pool: &mut StackPool = mem::transmute(pool.get());
+                    let pool: &mut StackPool = &mut *pool.get();
                     pool.give_stack(st);
                 })
             }

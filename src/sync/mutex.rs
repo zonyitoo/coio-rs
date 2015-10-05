@@ -116,7 +116,7 @@ impl<'a, T: 'a> Drop for Guard<'a, T> {
     fn drop(&mut self) {
         {
             let mut wait_list = self.mutex.wait_list.lock().unwrap();
-            for coro in wait_list.drain(..) {
+            while let Some(coro) = wait_list.pop() {
                 unsafe {
                     Scheduler::ready(coro);
                 }
