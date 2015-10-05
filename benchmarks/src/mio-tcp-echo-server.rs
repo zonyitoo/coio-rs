@@ -182,7 +182,7 @@ impl Handler for Echo {
 fn main() {
     env_logger::init().unwrap();
 
-    let matches = App::new("threaded-tcp-echo")
+    let matches = App::new("mio-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
                       .arg(Arg::with_name("BIND")
