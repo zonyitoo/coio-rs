@@ -60,6 +60,7 @@ unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
+    /// Create a scheduler with default configurations
     pub fn new() -> Scheduler {
         Scheduler {
             work_counts: AtomicUsize::new(0),
@@ -68,6 +69,7 @@ impl Scheduler {
         }
     }
 
+    /// Set the number of workers
     pub fn with_workers(mut self, workers: usize) -> Scheduler {
         assert!(workers >= 1, "Must have at least one worker");
         self.expected_worker_count = workers;
@@ -75,6 +77,7 @@ impl Scheduler {
     }
 
     /// Get the global Scheduler
+    #[doc(hidden)]
     #[inline]
     pub fn instance() -> &'static Scheduler {
         Processor::current().scheduler()
@@ -105,7 +108,7 @@ impl Scheduler {
         self.work_counts.load(Ordering::SeqCst)
     }
 
-    /// Spawn a new coroutine
+    /// Spawn a new coroutine with default options
     #[inline]
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         where F: FnOnce() -> T + Send + 'static,
@@ -171,7 +174,6 @@ impl Scheduler {
         }
 
         let main_ret = main_coro_hdl.recv().unwrap();
-        // TODO: Ask all workers to exit!
         for &(ref msg, _) in the_sched.proc_handles.lock().unwrap().iter() {
             let _ = msg.send(ProcMessage::Shutdown);
         }

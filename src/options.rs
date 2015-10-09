@@ -29,7 +29,8 @@ pub struct Options {
     pub name: Option<String>,
 }
 
-const DEFAULT_STACK: usize = 128 * 1024; // 128KB
+/// Default coroutine stack size, 128KB
+pub const DEFAULT_STACK: usize = 128 * 1024; // 128KB
 
 impl Options {
     pub fn new() -> Options {
