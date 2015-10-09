@@ -256,16 +256,23 @@ impl Processor {
             };
 
             // Try to fetch one task from the local queue
-            let next_hdl = self.queue_worker.pop();
-            if is_suspended {
-                // If the current task has to be suspended, then
-                // push it back to the local work queue
-                self.ready(hdl);
-            }
-
-            match next_hdl {
-                Some(h) => hdl = h.0,
-                None => break
+            match self.queue_worker.pop() {
+                Some(h) => {
+                    if is_suspended {
+                        // If the current task has to be suspended, then
+                        // push it back to the local work queue
+                        self.ready(hdl);
+                    }
+                    hdl = h.0;
+                },
+                None => {
+                    // Work queue is empty
+                    if !is_suspended {
+                        // Current task is blocked, just break the loop
+                        break;
+                    }
+                    // Resume current task
+                }
             }
         }
     }

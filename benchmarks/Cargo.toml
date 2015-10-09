@@ -12,6 +12,9 @@ log = "*"
 name = "coio-tcp-echo-server"
 
 [[bin]]
+name = "coio-http-echo-server"
+
+[[bin]]
 name = "mio-tcp-echo-server"
 
 [[bin]]

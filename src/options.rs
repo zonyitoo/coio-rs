@@ -29,7 +29,7 @@ pub struct Options {
     pub name: Option<String>,
 }
 
-const DEFAULT_STACK: usize = 2 * 1024 * 1024; // 2MB
+const DEFAULT_STACK: usize = 128 * 1024; // 128KB
 
 impl Options {
     pub fn new() -> Options {
