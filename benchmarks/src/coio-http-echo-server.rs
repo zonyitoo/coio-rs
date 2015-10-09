@@ -2,19 +2,19 @@ extern crate clap;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+extern crate hyper;
 
 extern crate coio;
 
 use clap::{Arg, App};
 
+use hyper::http;
+use hyper::buffer::BufReader;
+use hyper::server::Response;
+use hyper::header::Headers;
+
 use coio::Scheduler;
 use coio::net::tcp::TcpListener;
-
-const RESPONSE: &'static [u8] = b"HTTP/1.1 200 OK\r
-Content-Length: 14\r
-\r
-Hello World\r
-\r";
 
 fn main() {
     env_logger::init().unwrap();
@@ -45,14 +45,31 @@ fn main() {
             info!("Listening on {:?}", server.local_addr().unwrap());
 
             for stream in server.incoming() {
-                use std::io::Write;
-
                 let (mut stream, addr) = stream.unwrap();
                 info!("Accept connection: {:?}", addr);
 
                 Scheduler::spawn(move || {
+                    let mut bufreader = BufReader::new(stream.try_clone().unwrap());
+
                     loop {
-                        if let Err(..) = stream.write_all(RESPONSE) {
+                        let req = match http::h1::parse_request(&mut bufreader) {
+                            Err(..) => {
+                                // error!("Failed to parse request: {:?}", err);
+                                break;
+                            },
+                            Ok(req) => req
+                        };
+
+                        let should_keep_alive = http::should_keep_alive(req.version, &req.headers);
+
+                        let mut header = Headers::new();
+                        let response = Response::new(&mut stream, &mut header);
+                        if let Err(err) = response.send(b"Hello World!\n") {
+                            error!("Failed to write response: {:?}", err);
+                            break;
+                        }
+
+                        if !should_keep_alive {
                             break;
                         }
                     }
