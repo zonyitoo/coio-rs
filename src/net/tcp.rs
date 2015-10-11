@@ -29,8 +29,6 @@ use std::iter::Iterator;
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::{AsRawSocket, RawSocket};
 
 use mio::{self, EventSet};
 
@@ -101,13 +99,6 @@ impl DerefMut for TcpListener {
 impl AsRawFd for TcpListener {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
-    }
-}
-
-#[cfg(windows)]
-impl AsRawSocket for TcpListener {
-    fn as_raw_fd(&self) -> RawSocket {
-        self.0.as_raw_socket()
     }
 }
 
@@ -290,12 +281,5 @@ impl DerefMut for TcpStream {
 impl AsRawFd for TcpStream {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
-    }
-}
-
-#[cfg(windows)]
-impl AsRawSocket for TcpStream {
-    fn as_raw_fd(&self) -> RawSocket {
-        self.0.as_raw_socket()
     }
 }
