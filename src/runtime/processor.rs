@@ -150,7 +150,7 @@ impl Processor {
     }
 
     #[inline]
-    pub fn run_with_fn<M, T>(name: String, sched: Arc<Scheduler>, f: M)
+    pub fn run_main<M, T>(name: String, sched: Arc<Scheduler>, f: M)
             -> (thread::JoinHandle<()>,
                 Sender<ProcMessage>,
                 Stealer<SendableCoroutinePtr>,
@@ -341,7 +341,10 @@ impl Processor {
                 }
             }
 
-            thread::sleep_ms(100);
+            if self.io_slabs.count() == 0
+                    && self.timer_slabs.count() == 0 {
+                Scheduler::instance().proc_wait();
+            }
         }
 
         self.is_scheduling = false;

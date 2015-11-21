@@ -22,10 +22,11 @@
 //! Global coroutine scheduler
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::sync::mpsc::Sender;
 use std::default::Default;
 use std::any::Any;
+use std::thread;
 
 use deque::Stealer;
 
@@ -54,6 +55,7 @@ pub struct Scheduler {
     work_counts: AtomicUsize,
     proc_handles: Mutex<Vec<(Sender<ProcMessage>, Stealer<SendableCoroutinePtr>)>>,
     expected_worker_count: usize,
+    starving_lock: Arc<(Mutex<usize>, Condvar)>,
 }
 
 unsafe impl Send for Scheduler {}
@@ -66,6 +68,7 @@ impl Scheduler {
             work_counts: AtomicUsize::new(0),
             proc_handles: Mutex::new(Vec::new()),
             expected_worker_count: 1,
+            starving_lock: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
 
@@ -88,6 +91,19 @@ impl Scheduler {
     #[inline]
     pub unsafe fn ready(coro: *mut Coroutine) {
         Processor::current().ready(coro);
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn proc_wait(&self) {
+        let &(ref lock, ref cond) = &*self.starving_lock;
+        let mut guard = lock.lock().unwrap();
+        *guard -= 1;
+        if *guard != 0 {
+            debug!("Thread {:?} is starving and exile ...", thread::current());
+            guard = cond.wait(guard).unwrap();
+        }
+        *guard += 1;
     }
 
     /// A coroutine is finished
@@ -133,6 +149,10 @@ impl Scheduler {
         };
         Processor::current().spawn_opts(Box::new(wrapper), opts);
 
+        let &(ref lock, ref cond) = &*Scheduler::instance().starving_lock;
+        let _ = lock.lock().unwrap();
+        cond.notify_one();
+
         JoinHandle { result: rx }
     }
 
@@ -146,13 +166,15 @@ impl Scheduler {
         let main_coro_hdl = {
             // The first worker
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
-            let (hdl, msg, st, main_hdl) = Processor::run_with_fn(format!("Worker 0"),
+            let (hdl, msg, st, main_hdl) = Processor::run_main(format!("Worker 0"),
                                                                   the_sched.clone(),
                                                                   main_fn);
             handles.push(hdl);
             proc_handles.push((msg, st));
             main_hdl
         };
+
+        *the_sched.starving_lock.0.lock().unwrap() = the_sched.expected_worker_count;
 
         // The others
         for tid in 1..the_sched.expected_worker_count {
@@ -177,6 +199,10 @@ impl Scheduler {
         for &(ref msg, _) in the_sched.proc_handles.lock().unwrap().iter() {
             let _ = msg.send(ProcMessage::Shutdown);
         }
+
+        let &(ref lock, ref cond) = &*the_sched.starving_lock;
+        let _ = lock.lock().unwrap();
+        cond.notify_all();
 
         for hdl in handles {
             hdl.join().unwrap();
