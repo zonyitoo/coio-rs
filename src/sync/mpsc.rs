@@ -32,7 +32,6 @@ use coroutine::Coroutine;
 use scheduler::Scheduler;
 use runtime::processor::Processor;
 
-#[allow(raw_pointer_derive)]
 #[derive(Clone)]
 pub struct Sender<T> {
     inner: mpsc::Sender<T>,

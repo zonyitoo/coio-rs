@@ -163,6 +163,8 @@ impl Scheduler {
     {
         let the_sched = Arc::new(self);
         let mut handles = Vec::new();
+
+        *the_sched.starving_lock.0.lock().unwrap() = 1;
         let main_coro_hdl = {
             // The first worker
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();

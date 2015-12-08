@@ -299,7 +299,7 @@ impl Processor {
             if self.io_slabs.count() != 0 || self.timer_slabs.count() != 0 {
                 // Make the borrow checker happy.
                 let proc_ptr: *mut Processor = self;
-                if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
+                if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }, Some(100)) {
                     self.is_scheduling = false;
                     error!("EventLoop failed with {:?}", err);
                     return Err(err);
