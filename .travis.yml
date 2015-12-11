@@ -3,4 +3,4 @@ rust: nightly
 
 script:
     - cargo test -v
-    - cargo build --manifest-path benchmarks/Cargo.toml -v
+    #- cargo build --manifest-path benchmarks/Cargo.toml -v
