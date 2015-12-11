@@ -38,8 +38,8 @@ fn main() {
             });
 
             let hdls = vec![
-                invoke_every_ms(1000, || println!("Purr :P")),
-                invoke_after_ms(10000, || println!("Tadaaaaaaa")),
+                invoke_every_ms(100, || println!("Purr :P")),
+                invoke_after_ms(1000, || println!("Tadaaaaaaa")),
             ];
 
             for hdl in hdls {

@@ -22,7 +22,7 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(catch_panic, reflect_marker, fnbox)]
+#![feature(recover, std_panic, reflect_marker, fnbox)]
 
 #[macro_use]
 extern crate log;
@@ -33,6 +33,7 @@ extern crate rand;
 extern crate libc;
 
 use std::thread;
+use std::panic;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
@@ -123,7 +124,7 @@ impl Builder {
 unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
     let mut f = Some(f);
     let f = &mut f as *mut Option<F> as usize;
-    thread::catch_panic(move || {
+    panic::recover(move || {
         (*(f as *mut Option<F>)).take().unwrap()()
     })
 }
