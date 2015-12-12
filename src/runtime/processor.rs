@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::boxed::FnBox;
 use std::ptr;
 use std::any::Any;
+use std::time::Duration;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
@@ -451,6 +452,12 @@ impl Processor {
         } else {
             warn!("Called `wait_until` without running coroutine");
         }
+    }
+
+    /// Block the current coroutine until the specific time
+    #[inline]
+    pub fn sleep(&mut self, delay: Duration) {
+        self.sleep_ms(delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000)
     }
 
     /// Suspended the current running coroutine, equivalent to `Scheduler::sched`

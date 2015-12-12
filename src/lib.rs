@@ -34,6 +34,7 @@ extern crate libc;
 
 use std::thread;
 use std::panic;
+use std::time::Duration;
 
 pub use scheduler::{Scheduler, JoinHandle};
 pub use options::Options;
@@ -82,6 +83,13 @@ pub fn sched() {
 pub fn sleep_ms(ms: u64) {
     runtime::Processor::current()
         .sleep_ms(ms);
+}
+
+/// Put the current coroutine to sleep for the specific amount of time
+#[inline]
+pub fn sleep(duration: Duration) {
+    runtime::Processor::current()
+        .sleep(duration)
 }
 
 /// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.
