@@ -28,7 +28,7 @@ use std::convert::From;
 use std::iter::Iterator;
 
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use mio::{self, EventSet};
 
@@ -101,6 +101,14 @@ impl AsRawFd for TcpListener {
         self.0.as_raw_fd()
     }
 }
+
+#[cfg(unix)]
+impl FromRawFd for TcpListener {
+    unsafe fn from_raw_fd(fd: RawFd) -> TcpListener {
+        TcpListener(FromRawFd::from_raw_fd(fd))
+    }
+}
+
 
 pub struct Incoming<'a>(&'a TcpListener);
 
@@ -301,5 +309,12 @@ impl DerefMut for TcpStream {
 impl AsRawFd for TcpStream {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl FromRawFd for TcpStream {
+    unsafe fn from_raw_fd(fd: RawFd) -> TcpStream {
+        TcpStream(FromRawFd::from_raw_fd(fd))
     }
 }

@@ -26,7 +26,7 @@ use std::io;
 use std::net::{ToSocketAddrs, SocketAddr};
 
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use mio::EventSet;
 
@@ -129,5 +129,12 @@ impl DerefMut for UdpSocket {
 impl AsRawFd for UdpSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+impl FromRawFd for UdpSocket {
+    unsafe fn from_raw_fd(fd: RawFd) -> UdpSocket {
+        UdpSocket(FromRawFd::from_raw_fd(fd))
     }
 }
