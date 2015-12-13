@@ -152,9 +152,7 @@ impl Write for UnixStream {
                 debug!("UnixStream written {} bytes", len);
                 return Ok(len);
             }
-            Err(err) => {
-                return Err(err)
-            }
+            Err(err) => return Err(err),
         }
 
         loop {
@@ -170,9 +168,7 @@ impl Write for UnixStream {
                     debug!("UnixStream written {} bytes", len);
                     return Ok(len);
                 }
-                Err(err) => {
-                    return Err(err)
-                }
+                Err(err) => return Err(err),
             }
         }
     }
@@ -182,7 +178,7 @@ impl Write for UnixStream {
             Ok(..) => return Ok(()),
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 debug!("UnixStream flush WouldBlock");
-            },
+            }
             Err(err) => return Err(err),
         }
 
@@ -195,7 +191,7 @@ impl Write for UnixStream {
                 Ok(..) => return Ok(()),
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                     debug!("UnixStream flush WouldBlock");
-                },
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -310,8 +306,7 @@ impl FromRawFd for UnixListener {
 }
 
 pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
-    ::mio::unix::pipe()
-        .map(|(r, w)| (PipeReader(r), PipeWriter(w)))
+    ::mio::unix::pipe().map(|(r, w)| (PipeReader(r), PipeWriter(w)))
 }
 
 #[derive(Debug)]
@@ -399,9 +394,7 @@ impl Write for PipeWriter {
                 debug!("PipeWriter written {} bytes", len);
                 return Ok(len);
             }
-            Err(err) => {
-                return Err(err)
-            }
+            Err(err) => return Err(err),
         }
 
         loop {
@@ -417,9 +410,7 @@ impl Write for PipeWriter {
                     debug!("PipeWriter written {} bytes", len);
                     return Ok(len);
                 }
-                Err(err) => {
-                    return Err(err)
-                }
+                Err(err) => return Err(err),
             }
         }
     }
@@ -429,7 +420,7 @@ impl Write for PipeWriter {
             Ok(..) => return Ok(()),
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 debug!("PipeWriter flush WouldBlock");
-            },
+            }
             Err(err) => return Err(err),
         }
 
@@ -442,7 +433,7 @@ impl Write for PipeWriter {
                 Ok(..) => return Ok(()),
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                     debug!("PipeWriter flush WouldBlock");
-                },
+                }
                 Err(err) => return Err(err),
             }
         }

@@ -115,13 +115,13 @@ impl Deref for UdpSocket {
     type Target = ::mio::udp::UdpSocket;
 
     fn deref(&self) -> &::mio::udp::UdpSocket {
-        return &self.0
+        &self.0
     }
 }
 
 impl DerefMut for UdpSocket {
     fn deref_mut(&mut self) -> &mut ::mio::udp::UdpSocket {
-        return &mut self.0
+        &mut self.0
     }
 }
 

@@ -87,10 +87,10 @@ pub struct Processor {
 unsafe impl Send for Processor {}
 
 impl Processor {
-    fn new_with_neighbors(sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>) -> Processor {
-        let main_coro = unsafe {
-            Coroutine::empty()
-        };
+    fn new_with_neighbors(sched: Arc<Scheduler>,
+                          neigh: Vec<Stealer<SendableCoroutinePtr>>)
+                          -> Processor {
+        let main_coro = unsafe { Coroutine::empty() };
 
         let (worker, stealer) = BufferPool::new().deque();
         let (tx, rx) = mpsc::channel();
@@ -121,30 +121,37 @@ impl Processor {
     }
 
     #[inline]
-    pub fn run_with_neighbors(name: String, sched: Arc<Scheduler>, neigh: Vec<Stealer<SendableCoroutinePtr>>)
-            -> (thread::JoinHandle<()>, Sender<ProcMessage>, Stealer<SendableCoroutinePtr>) {
+    pub fn run_with_neighbors(name: String,
+                              sched: Arc<Scheduler>,
+                              neigh: Vec<Stealer<SendableCoroutinePtr>>)
+                              -> (thread::JoinHandle<()>,
+                                  Sender<ProcMessage>,
+                                  Stealer<SendableCoroutinePtr>) {
         let mut p = Processor::new_with_neighbors(sched, neigh);
         let (msg, st) = (p.handle(), p.stealer());
-        let hdl = Builder::new().name(name).spawn(move|| {
-            // Set to thread local
-            PROCESSOR.with(|proc_ptr| unsafe {
-                *proc_ptr.get() = &mut p
-            });
+        let hdl = Builder::new()
+                      .name(name)
+                      .spawn(move || {
+                          // Set to thread local
+                          PROCESSOR.with(|proc_ptr| unsafe { *proc_ptr.get() = &mut p });
 
-            if let Err(err) = p.schedule() {
-                panic!("Processor::schedule return Err: {:?}", err);
-            }
-        }).unwrap();
+                          if let Err(err) = p.schedule() {
+                              panic!("Processor::schedule return Err: {:?}", err);
+                          }
+                      })
+                      .unwrap();
 
         (hdl, msg, st)
     }
 
     #[inline]
-    pub fn run_main<M, T>(name: String, sched: Arc<Scheduler>, f: M)
-            -> (thread::JoinHandle<()>,
-                Sender<ProcMessage>,
-                Stealer<SendableCoroutinePtr>,
-                ::std::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>)
+    pub fn run_main<M, T>(name: String,
+                          sched: Arc<Scheduler>,
+                          f: M)
+                          -> (thread::JoinHandle<()>,
+                              Sender<ProcMessage>,
+                              Stealer<SendableCoroutinePtr>,
+                              ::std::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>)
         where M: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
@@ -233,16 +240,12 @@ impl Processor {
         let mut hdl = coro_ptr;
         loop {
             let is_suspended = match self.resume(hdl) {
-                Ok(State::Suspended) => {
-                    true
-                },
+                Ok(State::Suspended) => true,
                 Ok(State::Finished) | Err(..) => {
                     Scheduler::finished(hdl);
                     false
-                },
-                Ok(..) => {
-                    false
                 }
+                Ok(..) => false,
             };
 
             // Try to fetch one task from the local queue
@@ -254,7 +257,7 @@ impl Processor {
                         self.ready(hdl);
                     }
                     hdl = h.0;
-                },
+                }
                 None => {
                     // Work queue is empty
                     if !is_suspended {
@@ -271,8 +274,7 @@ impl Processor {
     fn schedule(&mut self) -> io::Result<()> {
         self.is_scheduling = true;
 
-        'outerloop:
-        loop {
+        'outerloop: loop {
             // 1. Run all tasks in local queue
             if let Some(hdl) = self.queue_worker.pop() {
                 unsafe {
@@ -290,7 +292,7 @@ impl Processor {
                 // Make the borrow checker happy.
                 let proc_ptr: *mut Processor = self;
                 if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }, Some(100)) {
-                // if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
+                    // if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
                     self.is_scheduling = false;
                     error!("EventLoop failed with {:?}", err);
                     return Err(err);
@@ -299,11 +301,7 @@ impl Processor {
                 if self.has_ready_tasks {
                     continue 'outerloop;
                 }
-            }
-            // } else if Scheduler::instance().work_count() == 0 {
-            //     break;
-            // } else {
-            else {
+            } else {
                 // We don't have active tasks in the local queue
                 // And we don't have any activated tasks from event loop
             }
@@ -332,8 +330,7 @@ impl Processor {
                 }
             }
 
-            if self.io_slabs.count() == 0
-                    && self.timer_slabs.count() == 0 {
+            if self.io_slabs.count() == 0 && self.timer_slabs.count() == 0 {
                 Scheduler::instance().proc_wait();
             }
         }
@@ -397,7 +394,7 @@ impl Processor {
                         debug!("Going to block with delay {} and {:?}", delay, token);
                         self.event_loop.timeout_ms(token, delay).unwrap();
                         break;
-                    },
+                    }
                     Err(..) => {}
                 }
             }
@@ -420,11 +417,11 @@ impl Processor {
     #[inline]
     pub fn sched(&mut self) {
         match self.cur_running.take() {
-            None => {},
+            None => {}
             Some(coro_ptr) => unsafe {
                 self.set_last_result(Ok(State::Suspended));
                 (&mut *coro_ptr).yield_to(&*self.main_coro)
-            }
+            },
         }
 
         // We are back!
@@ -438,11 +435,11 @@ impl Processor {
     #[inline]
     pub fn block(&mut self) {
         match self.cur_running.take() {
-            None => {},
+            None => {}
             Some(coro_ptr) => unsafe {
                 self.set_last_result(Ok(State::Blocked));
                 (&mut *coro_ptr).yield_to(&*self.main_coro)
-            }
+            },
         }
 
         // We are back!
@@ -456,11 +453,11 @@ impl Processor {
     #[inline]
     pub fn yield_with(&mut self, r: coroutine::Result<State>) {
         match self.cur_running.take() {
-            None => {},
+            None => {}
             Some(coro_ptr) => unsafe {
                 self.set_last_result(r);
                 (&mut *coro_ptr).yield_to(&*self.main_coro)
-            }
+            },
         }
     }
 }
@@ -469,12 +466,17 @@ impl Processor {
 impl Processor {
     /// Register and wait I/O
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
-        try!(self.event_loop.register(fd, token, interest,
-                                    //   PollOpt::edge()|PollOpt::oneshot()));
+        let token = self.io_slabs
+                        .insert(unsafe { Processor::current().running().unwrap() })
+                        .unwrap();
+        try!(self.event_loop.register(fd,
+                                      token,
+                                      interest,
+                                      // PollOpt::edge()|PollOpt::oneshot()));
                                       PollOpt::level()));
 
-        debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
+        debug!("wait_event: Blocked current Coroutine ...; token={:?}",
+               token);
         self.block();
         debug!("wait_event: Waked up; token={:?}", token);
 
@@ -497,10 +499,8 @@ impl Handler for Processor {
         }
 
         match self.io_slabs.remove(token) {
-            Some(hdl) => {
-                unsafe {
-                    self.ready(hdl);
-                }
+            Some(hdl) => unsafe {
+                self.ready(hdl);
             },
             None => {
                 warn!("No coroutine is waiting on token {:?}", token);
@@ -515,7 +515,8 @@ impl Handler for Processor {
                 self.ready(coro_ptr);
             },
             None => {
-                warn!("Timer token {:?} was awaited without waiting coroutines", token);
+                warn!("Timer token {:?} was awaited without waiting coroutines",
+                      token);
             }
         }
     }

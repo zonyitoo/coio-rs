@@ -169,8 +169,8 @@ impl Scheduler {
             // The first worker
             let mut proc_handles = the_sched.proc_handles.lock().unwrap();
             let (hdl, msg, st, main_hdl) = Processor::run_main(format!("Worker 0"),
-                                                                  the_sched.clone(),
-                                                                  main_fn);
+                                                               the_sched.clone(),
+                                                               main_fn);
             handles.push(hdl);
             proc_handles.push((msg, st));
             main_hdl

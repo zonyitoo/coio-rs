@@ -240,9 +240,7 @@ impl io::Write for TcpStream {
                     debug!("Write: Got write event");
                     try!(self.take_socket_error());
                 }
-                Err(err) => {
-                    return Err(err)
-                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -259,9 +257,7 @@ impl io::Write for TcpStream {
                     debug!("TcpStream written {} bytes", len);
                     return Ok(len);
                 }
-                Err(err) => {
-                    return Err(err)
-                }
+                Err(err) => return Err(err),
             }
         }
     }
@@ -271,7 +267,7 @@ impl io::Write for TcpStream {
             Ok(..) => return Ok(()),
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 debug!("TcpStream flush WouldBlock");
-            },
+            }
             Err(err) => return Err(err),
         }
 
@@ -284,7 +280,7 @@ impl io::Write for TcpStream {
                 Ok(..) => return Ok(()),
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                     debug!("TcpStream flush WouldBlock");
-                },
+                }
                 Err(err) => return Err(err),
             }
         }
