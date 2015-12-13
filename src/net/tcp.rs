@@ -259,7 +259,27 @@ impl io::Write for TcpStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        match self.0.flush() {
+            Ok(..) => return Ok(()),
+            Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                debug!("TcpStream::flush WouldBlock");
+            },
+            Err(err) => return Err(err),
+        }
+
+        loop {
+            debug!("Write: Going to register event");
+            try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+            debug!("Write: Got write event");
+
+            match self.0.flush() {
+                Ok(..) => return Ok(()),
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                    debug!("TcpStream::flush WouldBlock");
+                },
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 
