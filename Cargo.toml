@@ -1,6 +1,6 @@
 [package]
 name = "coio"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
 description = "Coroutine scheduler with non-blocking I/O support"
 repository = "https://github.com/zonyitoo/coio-rs"
@@ -21,11 +21,9 @@ rand = "^0.3.10"
 chrono = "^0.2.15"
 libc = "^0.1.10"
 deque = "^0.2.3"
-#mio = "^0.4"
 
 [dependencies.context]
 git = "https://github.com/zonyitoo/context-rs.git"
 
 [dependencies.mio]
 git = "https://github.com/carllerche/mio.git"
-#rev = "ac165e089337b3ff43730ce49c516a86496a25f2"
