@@ -28,4 +28,4 @@ git = "https://github.com/zonyitoo/context-rs.git"
 
 [dependencies.mio]
 git = "https://github.com/carllerche/mio.git"
-rev = "ac165e089337b3ff43730ce49c516a86496a25f2"
+#rev = "ac165e089337b3ff43730ce49c516a86496a25f2"

@@ -79,17 +79,6 @@ pub struct Processor {
     is_scheduling: bool,
     has_ready_tasks: bool,
 
-    #[cfg(any(target_os = "linux",
-              target_os = "android"))]
-    io_slabs: Slab<(*mut Coroutine, Io)>,
-    #[cfg(any(target_os = "macos",
-              target_os = "freebsd",
-              target_os = "dragonfly",
-              target_os = "ios",
-              target_os = "bitrig",
-              target_os = "openbsd"))]
-    io_slabs: Slab<*mut Coroutine>,
-    #[cfg(windows)]
     io_slabs: Slab<*mut Coroutine>,
 
     timer_slabs: Slab<*mut Coroutine>,
@@ -300,8 +289,8 @@ impl Processor {
             if self.io_slabs.count() != 0 || self.timer_slabs.count() != 0 {
                 // Make the borrow checker happy.
                 let proc_ptr: *mut Processor = self;
-                //if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }, Some(100)) {
-                if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
+                if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }, Some(100)) {
+                // if let Err(err) = self.event_loop.run_once(unsafe { &mut *proc_ptr }) {
                     self.is_scheduling = false;
                     error!("EventLoop failed with {:?}", err);
                     return Err(err);
@@ -354,39 +343,6 @@ impl Processor {
         Ok(())
     }
 
-    #[cfg(any(target_os = "linux",
-              target_os = "android"))]
-    fn destroy_all_coroutines(&mut self) {
-        self.is_exiting = true;
-
-        // 1. Drain the work queue.
-        if let Some(hdl) = self.queue_worker.pop() {
-            unsafe {
-                self.run_with_all_local_tasks(hdl.0);
-            }
-        }
-
-        // 2. Drain I/O Slab
-        let io_hdls: Vec<*mut Coroutine> = self.io_slabs.iter().map(|x| x.0).collect();
-        for hdl in io_hdls {
-            let _ = self.resume(hdl);
-            unsafe {
-                Scheduler::finished(hdl);
-            }
-        }
-
-        // 3. Drain timer Slab
-        let timer_hdls: Vec<*mut Coroutine> = self.timer_slabs.iter().map(|x| *x).collect();
-        for hdl in timer_hdls {
-            let _ = self.resume(hdl);
-            unsafe {
-                Scheduler::finished(hdl);
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux",
-                  target_os = "android")))]
     fn destroy_all_coroutines(&mut self) {
         // Not epoll
         self.is_exiting = true;
@@ -512,48 +468,18 @@ impl Processor {
 
 impl Processor {
     /// Register and wait I/O
-    #[cfg(any(target_os = "linux",
-              target_os = "android"))]
-    pub fn wait_event<E: Evented + AsRawFd>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.io_slabs.insert((unsafe { Processor::current().running().unwrap() },
-                                               From::from(fd.as_raw_fd()))).unwrap();
-        try!(self.event_loop.register(fd, token, interest,
-                                      PollOpt::edge()|PollOpt::oneshot()));
-
-        debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
-        self.block();
-        debug!("wait_event: Waked up; token={:?}", token);
-
-        Ok(())
-    }
-
-    #[cfg(any(target_os = "macos",
-              target_os = "freebsd",
-              target_os = "dragonfly",
-              target_os = "ios",
-              target_os = "bitrig",
-              target_os = "openbsd"))]
     pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
         let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
         try!(self.event_loop.register(fd, token, interest,
-                                      PollOpt::edge()|PollOpt::oneshot()));
+                                    //   PollOpt::edge()|PollOpt::oneshot()));
+                                      PollOpt::level()));
 
         debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
         self.block();
         debug!("wait_event: Waked up; token={:?}", token);
 
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    pub fn wait_event<E: Evented>(&mut self, fd: &E, interest: EventSet) -> io::Result<()> {
-        let token = self.io_slabs.insert(unsafe { Processor::current().running().unwrap() }).unwrap();
-        try!(self.event_loop.register(fd, token, interest,
-                                      PollOpt::edge()|PollOpt::oneshot()));
-
-        debug!("wait_event: Blocked current Coroutine ...; token={:?}", token);
-        self.block();
-        debug!("wait_event: Waked up; token={:?}", token);
+        // For the latest MIO version, it requires to deregister every Evented object
+        try!(self.event_loop.deregister(fd));
 
         Ok(())
     }
@@ -563,56 +489,6 @@ impl Handler for Processor {
     type Timeout = Token;
     type Message = ();
 
-    #[cfg(any(target_os = "linux",
-              target_os = "android"))]
-    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
-        debug!("Got {:?} for {:?}", events, token);
-        if token == Token(0) {
-            error!("Received events from Token(0): {:?}", events);
-            return;
-        }
-
-        match self.io_slabs.remove(token) {
-            Some((hdl, fd)) => {
-                // Linux EPoll needs to explicit EPOLL_CTL_DEL the fd
-                event_loop.deregister(&fd).unwrap();
-                mem::forget(fd);
-                unsafe {
-                    self.ready(hdl);
-                }
-            },
-            None => {
-                warn!("No coroutine is waiting on token {:?}", token);
-            }
-        }
-    }
-
-    #[cfg(any(target_os = "macos",
-              target_os = "freebsd",
-              target_os = "dragonfly",
-              target_os = "ios",
-              target_os = "bitrig",
-              target_os = "openbsd"))]
-    fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
-        debug!("Got {:?} for {:?}", events, token);
-        if token == Token(0) {
-            error!("Received events from Token(0): {:?}", events);
-            return;
-        }
-
-        match self.io_slabs.remove(token) {
-            Some(hdl) => {
-                unsafe {
-                    self.ready(hdl);
-                }
-            },
-            None => {
-                warn!("No coroutine is waiting on token {:?}", token);
-            }
-        }
-    }
-
-    #[cfg(windows)]
     fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
         if token == Token(0) {
