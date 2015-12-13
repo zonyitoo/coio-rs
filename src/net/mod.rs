@@ -23,12 +23,16 @@
 
 pub use self::tcp::{TcpListener, TcpStream, Shutdown};
 pub use self::udp::UdpSocket;
+#[cfg(unix)]
+pub use self::unix::{UnixListener, UnixStream, UnixSocket};
 
 use std::io;
 use std::net::{ToSocketAddrs, SocketAddr};
 
 pub mod tcp;
 pub mod udp;
+#[cfg(unix)]
+pub mod unix;
 
 fn each_addr<A: ToSocketAddrs, F, T>(addr: A, mut f: F) -> io::Result<T>
     where F: FnMut(&SocketAddr) -> io::Result<T>

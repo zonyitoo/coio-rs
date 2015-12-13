@@ -5,6 +5,9 @@ use std::io::{Read, Write};
 use coio::Scheduler;
 use coio::net::{TcpListener, TcpStream, UdpSocket, Shutdown};
 
+#[cfg(unix)]
+use coio::net::{UnixStream, UnixListener};
+
 #[test]
 fn test_tcp_echo() {
 
@@ -72,4 +75,35 @@ fn test_udp_echo() {
         sender_fut.join().unwrap();
     }).unwrap();
 
+}
+
+#[cfg(unix)]
+#[test]
+fn test_unix_socket_echo() {
+    Scheduler::new().run(move|| {
+        // Listener
+        let listen_fut = Scheduler::spawn(move|| {
+            let acceptor = UnixListener::bind("127.0.0.1:6789").unwrap();
+            let mut stream = acceptor.accept().unwrap();
+
+            let mut buf = [0u8; 1024];
+            let len = stream.read(&mut buf).unwrap();
+            stream.write_all(&buf[..len])
+                  .and_then(|_| stream.flush()).unwrap();
+        });
+
+        let sender_fut = Scheduler::spawn(move|| {
+            let mut stream = UnixStream::connect("127.0.0.1:6789").unwrap();
+            stream.write_all(b"abcdefg")
+                  .and_then(|_| stream.flush()).unwrap();
+
+            let mut buf = [0u8; 1024];
+            let len = stream.read(&mut buf).unwrap();
+
+            assert_eq!(&buf[..len], b"abcdefg");
+        });
+
+        listen_fut.join().unwrap();
+        sender_fut.join().unwrap();
+    }).unwrap();
 }

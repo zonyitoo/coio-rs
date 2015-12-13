@@ -45,7 +45,7 @@ impl TcpListener {
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         match self.0.accept() {
             Ok(None) => {
-                debug!("accept WouldBlock; going to register into eventloop");
+                debug!("TcpListener accept WouldBlock; going to register into eventloop");
             }
             Ok(Some((stream, addr))) => {
                 return Ok((TcpStream(stream), addr));
@@ -60,7 +60,7 @@ impl TcpListener {
 
             match self.0.accept() {
                 Ok(None) => {
-                    warn!("accept WouldBlock; Coroutine was awaked by readable event");
+                    warn!("TcpListener accept WouldBlock; Coroutine was awaked by readable event");
                 }
                 Ok(Some((stream, addr))) => {
                     return Ok((TcpStream(stream), addr));
@@ -270,7 +270,7 @@ impl io::Write for TcpStream {
         match self.0.flush() {
             Ok(..) => return Ok(()),
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                debug!("TcpStream::flush WouldBlock");
+                debug!("TcpStream flush WouldBlock");
             },
             Err(err) => return Err(err),
         }
@@ -283,7 +283,7 @@ impl io::Write for TcpStream {
             match self.0.flush() {
                 Ok(..) => return Ok(()),
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                    debug!("TcpStream::flush WouldBlock");
+                    debug!("TcpStream flush WouldBlock");
                 },
                 Err(err) => return Err(err),
             }
