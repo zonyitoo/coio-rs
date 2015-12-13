@@ -8,6 +8,7 @@ clap = "*"
 env_logger = "*"
 log = "*"
 hyper = "*"
+mio = "^0.5.0"
 
 [[bin]]
 name = "coio-tcp-echo-server"
@@ -20,13 +21,13 @@ name = "mio-tcp-echo-server"
 
 [[bin]]
 name = "threaded-tcp-echo-server"
-
-[dependencies.mio]
-git = "https://github.com/carllerche/mio.git"
-
-[dependencies.bytes]
-git = "https://github.com/carllerche/bytes"
-rev = "7edb577d0a"
+#
+# [dependencies.mio]
+# git = "https://github.com/carllerche/mio.git"
+#
+# [dependencies.bytes]
+# git = "https://github.com/carllerche/bytes"
+# rev = "7edb577d0a"
 
 [dependencies.coio]
 path = "../"
