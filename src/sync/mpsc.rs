@@ -64,6 +64,8 @@ pub struct Receiver<T> {
     wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
 }
 
+unsafe impl<T: Send> Send for Receiver<T> {}
+
 impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.inner.try_recv()
