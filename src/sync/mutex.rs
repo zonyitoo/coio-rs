@@ -198,7 +198,7 @@ mod test {
 
         let num_cloned = num.clone();
         Scheduler::new()
-            .with_workers(10)
+            .with_workers(1)
             .run(move || {
                 let mut handlers = Vec::new();
 

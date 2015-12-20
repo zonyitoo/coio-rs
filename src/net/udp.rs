@@ -30,7 +30,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use mio::EventSet;
 
-use runtime::processor::Processor;
+use scheduler::Scheduler;
 
 pub struct UdpSocket(::mio::udp::UdpSocket);
 
@@ -61,7 +61,7 @@ impl UdpSocket {
                     debug!("UdpSocket send_to WOULDBLOCK");
 
                     loop {
-                        try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+                        try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
 
                         match self.0.send_to(buf, &addr) {
                             Ok(None) => {
@@ -97,7 +97,7 @@ impl UdpSocket {
         }
 
         loop {
-            try!(Processor::current().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
 
             match try!(self.0.recv_from(buf)) {
                 None => {

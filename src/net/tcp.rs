@@ -32,7 +32,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use mio::{self, EventSet};
 
-use runtime::processor::Processor;
+use scheduler::Scheduler;
 
 #[derive(Debug)]
 pub struct TcpListener(::mio::tcp::TcpListener);
@@ -56,7 +56,7 @@ impl TcpListener {
         }
 
         loop {
-            try!(Processor::current().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
 
             match self.0.accept() {
                 Ok(None) => {
@@ -188,7 +188,7 @@ impl io::Read for TcpStream {
                 Err(ref err) if err.kind() == ErrorKind::NotConnected => {
                     // If the socket is still still connecting, just register it into the loop
                     debug!("Read: Going to register event, socket is not connected");
-                    try!(Processor::current().wait_event(&self.0, EventSet::readable()));
+                    try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
                     debug!("Read: Got read event");
                     try!(self.take_socket_error());
                 }
@@ -200,7 +200,7 @@ impl io::Read for TcpStream {
 
         loop {
             debug!("Read: Going to register event");
-            try!(Processor::current().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
             debug!("Read: Got read event");
 
             match self.0.try_read(buf) {
@@ -236,7 +236,7 @@ impl io::Write for TcpStream {
                 Err(ref err) if err.kind() == ErrorKind::NotConnected => {
                     // If the socket is still still connecting, just register it into the loop
                     debug!("Write: Going to register event, socket is not connected");
-                    try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+                    try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
                     debug!("Write: Got write event");
                     try!(self.take_socket_error());
                 }
@@ -246,7 +246,7 @@ impl io::Write for TcpStream {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.try_write(buf) {
@@ -273,7 +273,7 @@ impl io::Write for TcpStream {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Processor::current().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.flush() {

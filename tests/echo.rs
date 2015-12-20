@@ -80,10 +80,16 @@ fn test_udp_echo() {
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_echo() {
+    use std::fs;
+
     Scheduler::new().run(move|| {
+        const FILE_PATH_STR: &'static str = "/tmp/coio-unix-socket-test.sock";
+
+        let _ = fs::remove_file(FILE_PATH_STR);
+
         // Listener
         let listen_fut = Scheduler::spawn(move|| {
-            let acceptor = UnixListener::bind("127.0.0.1:6789").unwrap();
+            let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
             let mut stream = acceptor.accept().unwrap();
 
             let mut buf = [0u8; 1024];
@@ -93,7 +99,7 @@ fn test_unix_socket_echo() {
         });
 
         let sender_fut = Scheduler::spawn(move|| {
-            let mut stream = UnixStream::connect("127.0.0.1:6789").unwrap();
+            let mut stream = UnixStream::connect(FILE_PATH_STR).unwrap();
             stream.write_all(b"abcdefg")
                   .and_then(|_| stream.flush()).unwrap();
 

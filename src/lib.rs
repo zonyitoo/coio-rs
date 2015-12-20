@@ -81,15 +81,13 @@ pub fn sched() {
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
 pub fn sleep_ms(ms: u64) {
-    runtime::Processor::current()
-        .sleep_ms(ms);
+    Scheduler::instance().sleep_ms(ms);
 }
 
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
 pub fn sleep(duration: Duration) {
-    runtime::Processor::current()
-        .sleep(duration)
+    Scheduler::instance().sleep(duration)
 }
 
 /// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.
