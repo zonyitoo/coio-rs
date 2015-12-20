@@ -14,6 +14,7 @@ clap = "*"
 env_logger = "*"
 num_cpus = "*"
 rand = "*"
+time = "*"
 
 [dependencies]
 log = "^0.3.1"
