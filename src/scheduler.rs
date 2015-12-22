@@ -345,17 +345,15 @@ impl Scheduler {
             let token = {
                 let mut io_handler = self.io_handler.lock().unwrap();
 
-                let token = io_handler.io_slab
-                                      .insert((processor.id(), ptr))
-                                      .unwrap();
-
-                try!(event_loop.register(fd,
-                                         token,
-                                         interest,
-                                         // PollOpt::edge()|PollOpt::oneshot()));
-                                         PollOpt::edge()));
-                token
+                io_handler.io_slab
+                          .insert((processor.id(), ptr))
+                          .unwrap()
             };
+            try!(event_loop.register(fd,
+                                     token,
+                                     interest,
+                                     // PollOpt::edge()|PollOpt::oneshot()));
+                                     PollOpt::edge()));
             debug!("wait_event: Blocked current Coroutine ...; token={:?}",
                    token);
 
@@ -375,17 +373,16 @@ impl Scheduler {
         let processor = Processor::current();
 
         if let Some(ptr) = unsafe { processor.running() } {
-            {
+            let token = {
                 let mut io_handler = self.io_handler.lock().unwrap();
 
-                let token = io_handler.timer_slab
-                                      .insert((processor.id(), ptr))
-                                      .unwrap();
+                io_handler.timer_slab
+                          .insert((processor.id(), ptr))
+                          .unwrap()
+            };
+            let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
 
-                let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-
-                event_loop.timeout_ms(token, delay).unwrap();
-            }
+            event_loop.timeout_ms(token, delay).unwrap();
 
             processor.block();
         }
