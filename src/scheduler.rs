@@ -353,7 +353,7 @@ impl Scheduler {
                                          token,
                                          interest,
                                          // PollOpt::edge()|PollOpt::oneshot()));
-                                         PollOpt::level()));
+                                         PollOpt::edge()));
                 token
             };
             debug!("wait_event: Blocked current Coroutine ...; token={:?}",
