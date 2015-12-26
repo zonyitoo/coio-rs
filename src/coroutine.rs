@@ -21,6 +21,7 @@
 
 use std::cell::UnsafeCell;
 use std::boxed::FnBox;
+use std::sync::Mutex;
 
 use libc;
 
@@ -51,6 +52,7 @@ pub type Handle = Box<Coroutine>;
 pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
+    pub yield_lock: Mutex<()>,
 }
 
 impl Coroutine {
@@ -58,6 +60,7 @@ impl Coroutine {
         Box::new(Coroutine {
             context: Context::empty(),
             stack: None,
+            yield_lock: Mutex::new(()),
         })
     }
 
@@ -73,6 +76,7 @@ impl Coroutine {
         Box::new(Coroutine {
             context: ctx,
             stack: Some(stack),
+            yield_lock: Mutex::new(()),
         })
     }
 

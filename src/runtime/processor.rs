@@ -327,6 +327,7 @@ impl Processor {
     pub fn resume(&mut self, coro_ptr: *mut Coroutine) -> coroutine::Result<State> {
         self.cur_running = Some(coro_ptr);
         unsafe {
+            let _guard = (*coro_ptr).yield_lock.lock().unwrap();
             self.main_coro.yield_to(&mut *coro_ptr);
         }
 
