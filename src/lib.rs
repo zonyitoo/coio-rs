@@ -31,6 +31,7 @@ extern crate mio;
 extern crate deque;
 extern crate rand;
 extern crate libc;
+extern crate sema;
 
 use std::thread;
 use std::panic;
