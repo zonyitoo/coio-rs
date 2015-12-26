@@ -1,6 +1,6 @@
 [package]
 name = "coio"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
 description = "Coroutine scheduler with non-blocking I/O support"
 repository = "https://github.com/zonyitoo/coio-rs"

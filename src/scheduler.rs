@@ -352,16 +352,21 @@ impl Scheduler {
             try!(event_loop.register(fd,
                                      token,
                                      interest,
-                                     // PollOpt::edge()|PollOpt::oneshot()));
-                                     PollOpt::edge()));
+                                     PollOpt::edge() | PollOpt::oneshot()));
             debug!("wait_event: Blocked current Coroutine ...; token={:?}",
                    token);
-
             processor.block();
             debug!("wait_event: Waked up; token={:?}", token);
 
             // For the latest MIO version, it requires to deregister every Evented object
-            try!(event_loop.deregister(fd));
+            // But KQueue with EV_ONESHOT flag does not require explicit deregister
+            if cfg!(not(any(target_os = "macos",
+                            target_os = "ios",
+                            target_os = "freebsd",
+                            target_os = "dragonfly",
+                            target_os = "netbsd"))) {
+                try!(event_loop.deregister(fd));
+            }
         }
 
         Ok(())
