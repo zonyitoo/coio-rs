@@ -266,7 +266,7 @@ impl Scheduler {
         }
 
         loop {
-            {
+            let waited_event_loop = {
                 let mut io_handler = the_sched.io_handler.lock().unwrap();
 
                 if io_handler.io_slab.count() != 0 || io_handler.timer_slab.count() != 0 {
@@ -275,8 +275,11 @@ impl Scheduler {
                     };
 
                     event_loop.run_once(&mut io_handler, Some(100)).unwrap();
+                    true
+                } else {
+                    false
                 }
-            }
+            };
 
             match main_coro_hdl.try_recv() {
                 Ok(main_ret) => {
@@ -316,6 +319,10 @@ impl Scheduler {
                 Err(TryRecvError::Disconnected) => {
                     panic!("Main coro is disconnected");
                 }
+            }
+
+            if !waited_event_loop {
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }

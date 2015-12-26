@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::boxed::FnBox;
 use std::ptr;
 use std::any::Any;
+use std::time::Duration;
 
 // use mio::util::BoundedQueue;
 
@@ -304,6 +305,8 @@ impl Processor {
                     continue 'outerloop;
                 }
             }
+
+            thread::sleep(Duration::from_millis(100));
         }
 
         self.is_scheduling = false;
