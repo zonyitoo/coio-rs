@@ -9,6 +9,7 @@ env_logger = "*"
 log = "*"
 hyper = "*"
 mio = "*"
+bytes = "*"
 
 [[bin]]
 name = "coio-tcp-echo-server"
@@ -21,6 +22,7 @@ name = "mio-tcp-echo-server"
 
 [[bin]]
 name = "threaded-tcp-echo-server"
+
 #
 # [dependencies.mio]
 # git = "https://github.com/carllerche/mio.git"

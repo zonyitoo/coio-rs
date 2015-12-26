@@ -41,10 +41,15 @@ fn master(iters: usize, size: usize) {
 }
 
 fn main() {
-    let args: Vec<_> = std::env::args().collect();
-    let iters = args[1].parse().unwrap();
-    let size = args[2].parse().unwrap();
-    let procs = args[3].parse().unwrap();
+    let mut args = std::env::args();
+    let name = args.next().unwrap();
+    let (iters, size, procs) = match (args.next(), args.next(), args.next()) {
+        (Some(iters), Some(size), Some(procs)) => {
+            (iters.parse().unwrap(), size.parse().unwrap(), procs.parse().unwrap())
+        },
+        _ => panic!("{} <iters> <size> <procs>", name)
+    };
+
     let _ = Scheduler::new().with_workers(procs).run(move || {
         master(iters, size);
     });
