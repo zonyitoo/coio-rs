@@ -32,8 +32,6 @@ use std::ptr;
 use std::any::Any;
 use std::time::Duration;
 
-// use mio::util::BoundedQueue;
-
 use deque::{BufferPool, Stolen, Worker, Stealer};
 
 use rand;
@@ -169,11 +167,6 @@ impl Processor {
         self.cur_running
     }
 
-    // #[inline]
-    // pub fn set_neighbors(&mut self, neigh: Vec<Stealer<SendableCoroutinePtr>>) {
-    //     self.neighbor_stealers = neigh;
-    // }
-
     /// Get the thread local processor
     #[inline]
     pub fn current() -> &'static mut Processor {
@@ -269,11 +262,11 @@ impl Processor {
                     ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                     ProcMessage::Shutdown => {
                         self.destroy_all_coroutines();
-                    },
+                    }
                     ProcMessage::Ready(SendableCoroutinePtr(ptr)) => unsafe {
                         self.ready(ptr);
                         self.has_ready_tasks = true;
-                    }
+                    },
                 }
             }
 
@@ -290,7 +283,8 @@ impl Processor {
             let rand_idx = rand::random::<usize>();
             let total_stealers = self.neighbor_stealers.len();
             for idx in (0..self.neighbor_stealers.len()).map(|x| (x + rand_idx) % total_stealers) {
-                if let Stolen::Data(SendableCoroutinePtr(hdl)) = self.neighbor_stealers[idx].steal() {
+                if let Stolen::Data(SendableCoroutinePtr(hdl)) = self.neighbor_stealers[idx]
+                                                                     .steal() {
                     unsafe {
                         self.run_with_all_local_tasks(hdl);
                     }
