@@ -30,6 +30,7 @@ use std::thread;
 use std::io;
 use std::cell::UnsafeCell;
 use std::time::Duration;
+use std::ptr;
 
 use deque::Stealer;
 
@@ -74,11 +75,15 @@ impl Handler for IoHandler {
             return;
         }
 
-        match self.io_slab.remove(token) {
-            Some((idx, hdl)) => {
-                self.processors[idx].0.send(ProcMessage::Ready(SendableCoroutinePtr(hdl))).unwrap();
+        match self.io_slab.get_mut(token) {
+            Some(&mut (idx, ref mut hdl)) if *hdl != ptr::null_mut() => {
+                self.processors[idx]
+                    .0
+                    .send(ProcMessage::Ready(SendableCoroutinePtr(*hdl)))
+                    .unwrap();
+                *hdl = ptr::null_mut(); // Prevent unexpectly wake-up
             }
-            None => {
+            _ => {
                 warn!("No coroutine is waiting on token {:?}", token);
             }
         }
@@ -86,11 +91,15 @@ impl Handler for IoHandler {
 
     fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
         debug!("Timer waked up {:?}", token);
-        match self.timer_slab.remove(token) {
-            Some((idx, hdl)) => {
-                self.processors[idx].0.send(ProcMessage::Ready(SendableCoroutinePtr(hdl))).unwrap();
+        match self.timer_slab.get_mut(token) {
+            Some(&mut (idx, ref mut hdl)) if *hdl != ptr::null_mut() => {
+                self.processors[idx]
+                    .0
+                    .send(ProcMessage::Ready(SendableCoroutinePtr(*hdl)))
+                    .unwrap();
+                *hdl = ptr::null_mut(); // Prevent unexpectly wake-up
             }
-            None => {
+            _ => {
                 warn!("Timer token {:?} was awaited without waiting coroutines",
                       token);
             }
@@ -356,10 +365,7 @@ impl Scheduler {
                           .insert((processor.id(), ptr))
                           .unwrap()
             };
-            try!(event_loop.register(fd,
-                                     token,
-                                     interest,
-                                     PollOpt::edge() | PollOpt::oneshot()));
+            try!(event_loop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot()));
             debug!("wait_event: Blocked current Coroutine ...; token={:?}",
                    token);
             processor.block();
@@ -373,6 +379,11 @@ impl Scheduler {
                             target_os = "dragonfly",
                             target_os = "netbsd"))) {
                 try!(event_loop.deregister(fd));
+            }
+
+            {
+                let mut io_handler = self.io_handler.lock().unwrap();
+                io_handler.io_slab.remove(token);
             }
         }
 
@@ -397,6 +408,11 @@ impl Scheduler {
             event_loop.timeout_ms(token, delay).unwrap();
 
             processor.block();
+
+            {
+                let mut io_handler = self.io_handler.lock().unwrap();
+                io_handler.timer_slab.remove(token);
+            }
         }
     }
 
