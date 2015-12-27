@@ -65,14 +65,12 @@ pub struct Processor {
 
     is_scheduling: bool,
     has_ready_tasks: bool,
-
-    processor_id: usize,
 }
 
 unsafe impl Send for Processor {}
 
 impl Processor {
-    fn new_with_neighbors(processor_id: usize,
+    fn new_with_neighbors(_processor_id: usize,
                           sched: Arc<Scheduler>,
                           neigh: Vec<Stealer<SendableCoroutinePtr>>)
                           -> Processor {
@@ -98,7 +96,6 @@ impl Processor {
 
             is_scheduling: false,
             has_ready_tasks: false,
-            processor_id: processor_id,
         }
     }
 
@@ -191,11 +188,6 @@ impl Processor {
     #[inline]
     pub fn handle(&self) -> Sender<ProcMessage> {
         self.chan_sender.clone()
-    }
-
-    #[inline]
-    pub fn id(&self) -> usize {
-        self.processor_id
     }
 
     #[inline]

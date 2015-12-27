@@ -30,7 +30,8 @@ use std::thread;
 use std::io;
 use std::cell::UnsafeCell;
 use std::time::Duration;
-use std::ptr;
+use std::boxed::FnBox;
+use std::mem;
 
 use deque::Stealer;
 
@@ -58,63 +59,98 @@ impl<T> JoinHandle<T> {
 unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 struct IoHandler {
-    io_slab: Slab<(usize, *mut Coroutine)>,
-    timer_slab: Slab<(usize, *mut Coroutine)>,
-
-    processors: Vec<(Sender<ProcMessage>, Stealer<SendableCoroutinePtr>)>,
+    slab: Slab<Option<ReadyCallback<'static>>>,
 }
+
+type RegisterCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>, Token) + Send + 'a>;
+type ReadyCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>) + Send + 'a>;
+
+struct IoHandlerMessage {
+    register: RegisterCallback<'static>,
+    ready: ReadyCallback<'static>,
+}
+
+impl IoHandlerMessage {
+    fn new<'scope, Reg, Ready>(reg: Reg, ready: Ready) -> IoHandlerMessage
+        where Reg: FnOnce(&mut EventLoop<IoHandler>, Token) + Send + 'scope,
+              Ready: FnOnce(&mut EventLoop<IoHandler>) + Send + 'scope
+    {
+        let reg = unsafe {
+            mem::transmute::<RegisterCallback<'scope>, RegisterCallback<'static>>(Box::new(reg))
+        };
+
+        let ready = unsafe {
+            mem::transmute::<ReadyCallback<'scope>, ReadyCallback<'static>>(Box::new(ready))
+        };
+
+        IoHandlerMessage {
+            register: reg,
+            ready: ready,
+        }
+    }
+}
+
+unsafe impl Send for IoHandlerMessage {}
 
 impl Handler for IoHandler {
     type Timeout = Token;
-    type Message = ();
+    type Message = IoHandlerMessage;
 
-    fn ready(&mut self, _: &mut EventLoop<Self>, token: Token, events: EventSet) {
+    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
         debug!("Got {:?} for {:?}", events, token);
         if token == Token(0) {
             error!("Received events from Token(0): {:?}", events);
             return;
         }
 
-        match self.io_slab.get_mut(token) {
-            Some(&mut (idx, ref mut hdl)) if *hdl != ptr::null_mut() => {
-                self.processors[idx]
-                    .0
-                    .send(ProcMessage::Ready(SendableCoroutinePtr(*hdl)))
-                    .unwrap();
-                *hdl = ptr::null_mut(); // Prevent unexpectly wake-up
-            }
-            _ => {
+        match self.slab.remove(token) {
+            Some(cb) => cb.unwrap().call_box((event_loop,)),
+            None => {
                 warn!("No coroutine is waiting on token {:?}", token);
             }
         }
     }
 
-    fn timeout(&mut self, _: &mut EventLoop<Self>, token: Token) {
+    fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Token) {
         debug!("Timer waked up {:?}", token);
-        match self.timer_slab.get_mut(token) {
-            Some(&mut (idx, ref mut hdl)) if *hdl != ptr::null_mut() => {
-                self.processors[idx]
-                    .0
-                    .send(ProcMessage::Ready(SendableCoroutinePtr(*hdl)))
-                    .unwrap();
-                *hdl = ptr::null_mut(); // Prevent unexpectly wake-up
-            }
-            _ => {
-                warn!("Timer token {:?} was awaited without waiting coroutines",
-                      token);
+        if token == Token(0) {
+            error!("Received timeout event from Token(0)");
+            return;
+        }
+
+        match self.slab.remove(token) {
+            Some(cb) => cb.unwrap().call_box((event_loop,)),
+            None => {
+                warn!("No coroutine is waiting on token {:?}", token);
             }
         }
+    }
+
+    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
+        self.slab
+            .insert_with(move |token| {
+                let IoHandlerMessage { register, ready } = msg;
+                register.call_box((event_loop, token));
+                Some(ready)
+            })
+            .unwrap();
     }
 }
 
 impl IoHandler {
     fn new() -> IoHandler {
         IoHandler {
-            io_slab: Slab::new_starting_at(Token(1), 102400),
-            timer_slab: Slab::new_starting_at(Token(1), 102400),
-
-            processors: Vec::new(),
+            slab: Slab::new_starting_at(Token(1), 102400),
         }
+    }
+
+    fn wakeup_all(&mut self, event_loop: &mut EventLoop<Self>) {
+        for cb in self.slab.iter_mut() {
+            let cb = cb.take();
+            cb.unwrap().call_box((event_loop,));
+        }
+
+        self.slab.clear();
     }
 }
 
@@ -126,7 +162,8 @@ pub struct Scheduler {
     starving_lock: Arc<(Mutex<usize>, Condvar)>,
 
     eventloop: UnsafeCell<EventLoop<IoHandler>>,
-    io_handler: Mutex<IoHandler>,
+    io_handler: UnsafeCell<IoHandler>,
+    processors: Mutex<Vec<(Sender<ProcMessage>, Stealer<SendableCoroutinePtr>)>>,
 }
 
 unsafe impl Send for Scheduler {}
@@ -142,7 +179,8 @@ impl Scheduler {
             starving_lock: Arc::new((Mutex::new(0), Condvar::new())),
 
             eventloop: UnsafeCell::new(EventLoop::new().unwrap()),
-            io_handler: Mutex::new(IoHandler::new()),
+            io_handler: UnsafeCell::new(IoHandler::new()),
+            processors: Mutex::new(vec![]),
         }
     }
 
@@ -241,11 +279,11 @@ impl Scheduler {
         *the_sched.starving_lock.0.lock().unwrap() = 1;
         let main_coro_hdl = {
             // The first worker
-            let mut io_handler = the_sched.io_handler.lock().unwrap();
+            let mut processors = the_sched.processors.lock().unwrap();
 
             let (hdl, msg, st, main_hdl) = Processor::run_main(0, the_sched.clone(), main_fn);
             handles.push(hdl);
-            io_handler.processors.push((msg, st));
+            processors.push((msg, st));
             main_hdl
         };
 
@@ -254,62 +292,47 @@ impl Scheduler {
 
             // The others
             for tid in 1..the_sched.expected_worker_count {
-                let mut io_handler = the_sched.io_handler.lock().unwrap();
+                let mut processors = the_sched.processors.lock().unwrap();
 
                 let (hdl, msg, st) = Processor::run_with_neighbors(tid,
                                                                    the_sched.clone(),
-                                                                   io_handler.processors
-                                                                             .iter()
+                                                                   processors.iter()
                                                                              .map(|x| x.1.clone())
                                                                              .collect());
 
-                for &(ref msg, _) in io_handler.processors.iter() {
+                for &(ref msg, _) in processors.iter() {
                     if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
                         error!("Error while sending NewNeighbor {:?}", err);
                     }
                 }
 
                 handles.push(hdl);
-                io_handler.processors.push((msg, st));
+                processors.push((msg, st));
             }
         }
 
         loop {
-            let waited_event_loop = {
-                let mut io_handler = the_sched.io_handler.lock().unwrap();
+            {
+                let io_handler: &mut IoHandler = unsafe { &mut *the_sched.io_handler.get() };
+                let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *the_sched.eventloop.get() };
 
-                if io_handler.io_slab.count() != 0 || io_handler.timer_slab.count() != 0 {
-                    let event_loop: &mut EventLoop<IoHandler> = unsafe {
-                        &mut *the_sched.eventloop.get()
-                    };
-
-                    event_loop.run_once(&mut io_handler, Some(100)).unwrap();
-                    true
-                } else {
-                    false
-                }
-            };
+                event_loop.run_once(io_handler, Some(100)).unwrap();
+            }
 
             match main_coro_hdl.try_recv() {
                 Ok(main_ret) => {
                     {
-                        let io_handler = the_sched.io_handler.lock().unwrap();
+                        let processors = the_sched.processors.lock().unwrap();
 
-                        for &(ref msg, _) in io_handler.processors.iter() {
+                        for &(ref msg, _) in processors.iter() {
                             let _ = msg.send(ProcMessage::Shutdown);
                         }
+                    }
 
-                        for &(id, ptr) in io_handler.io_slab.iter() {
-                            let _ = io_handler.processors[id]
-                                        .0
-                                        .send(ProcMessage::Ready(SendableCoroutinePtr(ptr)));
-                        }
-
-                        for &(id, ptr) in io_handler.timer_slab.iter() {
-                            let _ = io_handler.processors[id]
-                                        .0
-                                        .send(ProcMessage::Ready(SendableCoroutinePtr(ptr)));
-                        }
+                    {
+                        let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *the_sched.eventloop.get() };
+                        let io_handler: &mut IoHandler = unsafe { &mut *the_sched.io_handler.get() };
+                        io_handler.wakeup_all(event_loop);
                     }
 
                     {
@@ -330,9 +353,6 @@ impl Scheduler {
                 }
             }
 
-            if !waited_event_loop {
-                thread::sleep(Duration::from_millis(100));
-            }
         }
     }
 
@@ -353,38 +373,77 @@ impl Scheduler {
 impl Scheduler {
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
-    pub fn wait_event<E: Evented>(&self, fd: &E, interest: EventSet) -> io::Result<()> {
+    pub fn wait_event<'scope, E: Evented>(&self,
+                                          fd: &'scope E,
+                                          interest: EventSet)
+                                          -> io::Result<()> {
         let processor = Processor::current();
 
         if let Some(ptr) = unsafe { processor.running() } {
             let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-            let token = {
-                let mut io_handler = self.io_handler.lock().unwrap();
+            // let token = {
+            //     let mut io_handler = self.io_handler.lock().unwrap();
+            //
+            //     io_handler.io_slab
+            //               .insert((processor.id(), ptr))
+            //               .unwrap()
+            // };
+            // try!(event_loop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot()));
+            // debug!("wait_event: Blocked current Coroutine ...; token={:?}",
+            //        token);
+            // processor.block();
+            // debug!("wait_event: Waked up; token={:?}", token);
+            //
+            // // For the latest MIO version, it requires to deregister every Evented object
+            // // But KQueue with EV_ONESHOT flag does not require explicit deregister
+            // if cfg!(not(any(target_os = "macos",
+            //                 target_os = "ios",
+            //                 target_os = "freebsd",
+            //                 target_os = "dragonfly",
+            //                 target_os = "netbsd"))) {
+            //     try!(event_loop.deregister(fd));
+            // }
+            //
+            // {
+            //     let mut io_handler = self.io_handler.lock().unwrap();
+            //     io_handler.io_slab.remove(token);
+            // }
+            let proc_hdl = processor.handle();
+            let sendable_coro = SendableCoroutinePtr(ptr);
+            let channel = event_loop.channel();
 
-                io_handler.io_slab
-                          .insert((processor.id(), ptr))
-                          .unwrap()
-            };
-            try!(event_loop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot()));
-            debug!("wait_event: Blocked current Coroutine ...; token={:?}",
-                   token);
+            struct EventedWrapper<E: Evented>(*const E);
+            unsafe impl<E: Evented> Send for EventedWrapper<E> {}
+            unsafe impl<E: Evented> Sync for EventedWrapper<E> {}
+
+            let fd1 = EventedWrapper(fd);
+            let fd2 = EventedWrapper(fd);
+
+            let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token| {
+                                                let fd: &E = unsafe { &*fd1.0 };
+                                                evloop.register(fd,
+                                                                token,
+                                                                interest,
+                                                                PollOpt::edge() |
+                                                                PollOpt::oneshot())
+                                                      .unwrap();
+                                            },
+                                            move |evloop: &mut EventLoop<IoHandler>| {
+                                                proc_hdl.send(ProcMessage::Ready(sendable_coro))
+                                                        .unwrap();
+
+                                                if cfg!(not(any(target_os = "macos",
+                                                                target_os = "ios",
+                                                                target_os = "freebsd",
+                                                                target_os = "dragonfly",
+                                                                target_os = "netbsd"))) {
+                                                    let fd: &E = unsafe { &*fd2.0 };
+                                                    evloop.deregister(fd).unwrap();
+                                                }
+                                            });
+            channel.send(msg).unwrap();
+
             processor.block();
-            debug!("wait_event: Waked up; token={:?}", token);
-
-            // For the latest MIO version, it requires to deregister every Evented object
-            // But KQueue with EV_ONESHOT flag does not require explicit deregister
-            if cfg!(not(any(target_os = "macos",
-                            target_os = "ios",
-                            target_os = "freebsd",
-                            target_os = "dragonfly",
-                            target_os = "netbsd"))) {
-                try!(event_loop.deregister(fd));
-            }
-
-            {
-                let mut io_handler = self.io_handler.lock().unwrap();
-                io_handler.io_slab.remove(token);
-            }
         }
 
         Ok(())
@@ -396,23 +455,36 @@ impl Scheduler {
         let processor = Processor::current();
 
         if let Some(ptr) = unsafe { processor.running() } {
-            let token = {
-                let mut io_handler = self.io_handler.lock().unwrap();
-
-                io_handler.timer_slab
-                          .insert((processor.id(), ptr))
-                          .unwrap()
-            };
+            // let token = {
+            //     let mut io_handler = self.io_handler.lock().unwrap();
+            //
+            //     io_handler.timer_slab
+            //               .insert((processor.id(), ptr))
+            //               .unwrap()
+            // };
             let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
+            // event_loop.timeout_ms(token, delay).unwrap();
+            //
+            // processor.block();
+            //
+            // {
+            //     let mut io_handler = self.io_handler.lock().unwrap();
+            //     io_handler.timer_slab.remove(token);
+            // }
+            let proc_hdl = processor.handle();
+            let sendable_coro = SendableCoroutinePtr(ptr);
+            let channel = event_loop.channel();
 
-            event_loop.timeout_ms(token, delay).unwrap();
+            let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token /* : _ */| {
+                                                evloop.timeout_ms(token, delay).unwrap();
+                                            },
+                                            move |_: &mut EventLoop<IoHandler>| {
+                                                proc_hdl.send(ProcMessage::Ready(sendable_coro))
+                                                        .unwrap();
+                                            });
+            channel.send(msg).unwrap();
 
             processor.block();
-
-            {
-                let mut io_handler = self.io_handler.lock().unwrap();
-                io_handler.timer_slab.remove(token);
-            }
         }
     }
 
