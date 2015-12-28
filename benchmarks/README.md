@@ -43,12 +43,3 @@
     - `go run tcp_bench.go -c 128 -t 30 -a "127.0.0.1:3000" -l 4096`
 
     - Benchmark program is copied from [mioco bench2](https://github.com/dpc/mioco#benchmarks).
-
-### Result
-
-| Server        | Requests     | Responses | Requests/sec | Responses/sec |
-| ------------- | ------------ | --------- | ------------ | ------------- |
-| coio          | 2062243      | 2062243   | 68741        | 68741         |
-| threaded      | 1958508      | 1958508   | 65283        | 65283         |
-| mio           | 1660154      | 1660154   | 55338        | 55338         |
-| go            | 2049316      | 2049316   | 68310        | 68310         |
