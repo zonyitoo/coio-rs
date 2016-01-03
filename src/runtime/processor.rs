@@ -21,24 +21,25 @@
 
 //! Processing unit of a thread
 
+use rand::Rng;
+use std::any::Any;
+use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::io;
-use std::thread::{self, Builder};
 use std::mem;
-use std::sync::mpsc::{self, Sender, Receiver};
-use std::sync::Arc;
-use std::boxed::FnBox;
 use std::ptr;
-use std::any::Any;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Sender, Receiver};
+use std::thread::{self, Builder};
 use std::time::Duration;
 
 use deque::{BufferPool, Stolen, Worker, Stealer};
 
 use rand;
 
-use scheduler::Scheduler;
 use coroutine::{self, Coroutine, State, Handle, SendableCoroutinePtr};
 use options::Options;
+use scheduler::Scheduler;
 
 thread_local!(static PROCESSOR: UnsafeCell<*mut Processor> = UnsafeCell::new(ptr::null_mut()));
 
@@ -54,6 +55,7 @@ pub struct Processor {
     last_result: Option<coroutine::Result<State>>,
     is_exiting: bool,
 
+    rng: rand::XorShiftRng,
     queue_worker: Worker<SendableCoroutinePtr>,
     queue_stealer: Stealer<SendableCoroutinePtr>,
     neighbor_stealers: Vec<Stealer<SendableCoroutinePtr>>,
@@ -85,6 +87,7 @@ impl Processor {
             last_result: None,
             is_exiting: false,
 
+            rng: rand::weak_rng(),
             queue_worker: worker,
             queue_stealer: stealer,
             neighbor_stealers: neigh,
@@ -280,7 +283,7 @@ impl Processor {
             }
 
             // 3. Randomly steal from neighbors
-            let rand_idx = rand::random::<usize>();
+            let rand_idx = self.rng.gen::<usize>();
             let total_stealers = self.neighbor_stealers.len();
             for idx in (0..self.neighbor_stealers.len()).map(|x| (x + rand_idx) % total_stealers) {
                 if let Stolen::Data(SendableCoroutinePtr(hdl)) = self.neighbor_stealers[idx]
@@ -292,7 +295,10 @@ impl Processor {
                 }
             }
 
-            thread::sleep(Duration::from_millis(100));
+            // This sleep throttles this loop in case a Processor runs out of work.
+            // TODO: Replace this sleep by some mechanism capable of waking up
+            //       idle workers as soon as new work is available.
+            thread::sleep(Duration::from_millis(10));
         }
 
         self.is_scheduling = false;
