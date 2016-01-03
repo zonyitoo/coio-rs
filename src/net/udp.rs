@@ -61,7 +61,9 @@ impl UdpSocket {
                     debug!("UdpSocket send_to WOULDBLOCK");
 
                     loop {
-                        try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
+                        try!(Scheduler::instance()
+                                 .unwrap()
+                                 .wait_event(&self.0, EventSet::writable()));
 
                         match self.0.send_to(buf, &addr) {
                             Ok(None) => {
@@ -97,7 +99,7 @@ impl UdpSocket {
         }
 
         loop {
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::readable()));
 
             match try!(self.0.recv_from(buf)) {
                 None => {

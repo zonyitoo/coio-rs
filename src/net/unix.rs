@@ -123,7 +123,7 @@ impl Read for UnixStream {
 
         loop {
             debug!("Read: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::readable()));
             debug!("Read: Got read event");
 
             match self.0.try_read(buf) {
@@ -157,7 +157,7 @@ impl Write for UnixStream {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.try_write(buf) {
@@ -184,7 +184,7 @@ impl Write for UnixStream {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.flush() {
@@ -252,7 +252,7 @@ impl UnixListener {
         }
 
         loop {
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::readable()));
 
             match self.0.accept() {
                 Ok(None) => {
@@ -330,7 +330,7 @@ impl Read for PipeReader {
 
         loop {
             debug!("Read: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::readable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::readable()));
             debug!("Read: Got read event");
 
             match self.0.try_read(buf) {
@@ -399,7 +399,7 @@ impl Write for PipeWriter {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.try_write(buf) {
@@ -426,7 +426,7 @@ impl Write for PipeWriter {
 
         loop {
             debug!("Write: Going to register event");
-            try!(Scheduler::instance().wait_event(&self.0, EventSet::writable()));
+            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::writable()));
             debug!("Write: Got write event");
 
             match self.0.flush() {

@@ -17,12 +17,10 @@ rand = "*"
 time = "*"
 
 [dependencies]
-log = "^0.3.1"
-rand = "^0.3.10"
 chrono = "^0.2.15"
-libc = "^0.1.10"
+context = { git = "https://github.com/zonyitoo/context-rs.git" }
 deque = "^0.2.3"
+libc = "^0.1.10"
+log = "^0.3.1"
 mio = "^0.5.0"
-
-[dependencies.context]
-git = "https://github.com/zonyitoo/context-rs.git"
+rand = "^0.3.10"

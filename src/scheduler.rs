@@ -189,15 +189,15 @@ impl Scheduler {
     /// Get the global Scheduler
     #[doc(hidden)]
     #[inline]
-    pub fn instance() -> &'static Scheduler {
-        Processor::current().scheduler()
+    pub fn instance() -> Option<&'static Scheduler> {
+        Processor::current().and_then(|p| Some(p.scheduler()))
     }
 
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn ready(coro: *mut Coroutine) {
-        Processor::current().ready(coro);
+    pub fn ready(coro: *mut Coroutine) {
+        Processor::current().unwrap().ready(coro);
     }
 
     /// A coroutine is finished
@@ -205,10 +205,10 @@ impl Scheduler {
     /// The coroutine will be destroy, make sure that the coroutine pointer is unique!
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn finished(coro_ptr: *mut Coroutine) {
-        Scheduler::instance().work_counts.fetch_sub(1, Ordering::SeqCst);
+    pub fn finished(coro_ptr: *mut Coroutine) {
+        Scheduler::instance().unwrap().work_counts.fetch_sub(1, Ordering::SeqCst);
 
-        let boxed = Box::from_raw(coro_ptr);
+        let boxed = unsafe { Box::from_raw(coro_ptr) };
         drop(boxed);
     }
 
@@ -232,7 +232,9 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        Scheduler::instance().work_counts.fetch_add(1, Ordering::SeqCst);
+        let processor = Processor::current().unwrap();
+
+        processor.scheduler().work_counts.fetch_add(1, Ordering::SeqCst);
 
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move || {
@@ -241,7 +243,7 @@ impl Scheduler {
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.send(ret); // Just ignore if it failed
         };
-        Processor::current().spawn_opts(Box::new(wrapper), opts);
+        processor.spawn_opts(Box::new(wrapper), opts);
 
         JoinHandle { result: rx }
     }
@@ -332,68 +334,74 @@ impl Scheduler {
         }
     }
 
-
     /// Suspend the current coroutine
     #[inline]
     pub fn sched() {
-        Processor::current().sched();
+        Processor::current().unwrap().sched();
     }
 
     /// Block the current coroutine
     #[inline]
     pub fn block() {
-        Processor::current().block();
+        Processor::current().unwrap().block();
     }
 }
 
 impl Scheduler {
+    fn get_processor_and_coroutine() -> io::Result<(&'static mut Processor, *mut Coroutine)> {
+        if let Some(processor) = Processor::current() {
+            if let Some(coroutine) = processor.running() {
+                return Ok((processor, coroutine));
+            }
+        };
+
+        Err(io::Error::new(io::ErrorKind::Other, "A running coroutine is required!"))
+    }
+
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
     pub fn wait_event<'scope, E: Evented>(&self,
                                           fd: &'scope E,
                                           interest: EventSet)
                                           -> io::Result<()> {
-        let processor = Processor::current();
+        let (processor, ptr) = try!(Scheduler::get_processor_and_coroutine());
 
-        if let Some(ptr) = unsafe { processor.running() } {
-            let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-            let proc_hdl = processor.handle();
-            let sendable_coro = SendableCoroutinePtr(ptr);
-            let channel = event_loop.channel();
+        let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
+        let proc_hdl = processor.handle();
+        let sendable_coro = SendableCoroutinePtr(ptr);
+        let channel = event_loop.channel();
 
-            struct EventedWrapper<E: Evented>(*const E);
-            unsafe impl<E: Evented> Send for EventedWrapper<E> {}
-            unsafe impl<E: Evented> Sync for EventedWrapper<E> {}
+        struct EventedWrapper<E: Evented>(*const E);
+        unsafe impl<E: Evented> Send for EventedWrapper<E> {}
+        unsafe impl<E: Evented> Sync for EventedWrapper<E> {}
 
-            let fd1 = EventedWrapper(fd);
-            let fd2 = EventedWrapper(fd);
+        let fd1 = EventedWrapper(fd);
+        let fd2 = EventedWrapper(fd);
 
-            let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token| {
-                                                let fd: &E = unsafe { &*fd1.0 };
-                                                evloop.register(fd,
-                                                                token,
-                                                                interest,
-                                                                PollOpt::edge() |
-                                                                PollOpt::oneshot())
-                                                      .unwrap();
-                                            },
-                                            move |evloop: &mut EventLoop<IoHandler>| {
-                                                proc_hdl.send(ProcMessage::Ready(sendable_coro))
-                                                        .unwrap();
+        let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token| {
+                                            let fd: &E = unsafe { &*fd1.0 };
+                                            evloop.register(fd,
+                                                            token,
+                                                            interest,
+                                                            PollOpt::edge() | PollOpt::oneshot())
+                                                  .unwrap();
+                                        },
+                                        move |evloop: &mut EventLoop<IoHandler>| {
+                                            proc_hdl.send(ProcMessage::Ready(sendable_coro))
+                                                    .unwrap();
 
-                                                if cfg!(not(any(target_os = "macos",
-                                                                target_os = "ios",
-                                                                target_os = "freebsd",
-                                                                target_os = "dragonfly",
-                                                                target_os = "netbsd"))) {
-                                                    let fd: &E = unsafe { &*fd2.0 };
-                                                    evloop.deregister(fd).unwrap();
-                                                }
-                                            });
-            channel.send(msg).unwrap();
+                                            if cfg!(not(any(target_os = "macos",
+                                                            target_os = "ios",
+                                                            target_os = "freebsd",
+                                                            target_os = "dragonfly",
+                                                            target_os = "netbsd"))) {
+                                                let fd: &E = unsafe { &*fd2.0 };
+                                                evloop.deregister(fd).unwrap();
+                                            }
+                                        });
+        channel.send(msg).unwrap();
 
-            processor.block();
-        }
+        processor.block();
 
         Ok(())
     }
@@ -401,9 +409,7 @@ impl Scheduler {
     /// Block the current coroutine until the specific time
     #[doc(hidden)]
     pub fn sleep_ms(&self, delay: u64) {
-        let processor = Processor::current();
-
-        if let Some(ptr) = unsafe { processor.running() } {
+        if let Ok((processor, ptr)) = Scheduler::get_processor_and_coroutine() {
             let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
             let proc_hdl = processor.handle();
             let sendable_coro = SendableCoroutinePtr(ptr);

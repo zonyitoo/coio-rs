@@ -27,7 +27,6 @@ use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::io;
 use std::mem;
-use std::ptr;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::thread::{self, Builder};
@@ -41,7 +40,7 @@ use coroutine::{self, Coroutine, State, Handle, SendableCoroutinePtr};
 use options::Options;
 use scheduler::Scheduler;
 
-thread_local!(static PROCESSOR: UnsafeCell<*mut Processor> = UnsafeCell::new(ptr::null_mut()));
+thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
 #[derive(Debug)]
 pub struct ForceUnwind;
@@ -100,6 +99,13 @@ impl Processor {
         }
     }
 
+    fn set_and_get_tls(p: Processor) -> &'static mut Processor {
+        PROCESSOR.with(move |proc_opt| unsafe {
+            *proc_opt.get() = Some(p);
+            (*proc_opt.get()).as_mut().unwrap()
+        })
+    }
+
     #[inline]
     pub fn run_with_neighbors(processor_id: usize,
                               sched: Arc<Scheduler>,
@@ -107,14 +113,13 @@ impl Processor {
                               -> (thread::JoinHandle<()>,
                                   Sender<ProcMessage>,
                                   Stealer<SendableCoroutinePtr>) {
-        let mut p = Processor::new_with_neighbors(processor_id, sched, neigh);
-        let (msg, st) = (p.handle(), p.stealer());
+        let p = Processor::new_with_neighbors(processor_id, sched, neigh);
+        let msg = p.handle();
+        let st = p.stealer();
         let hdl = Builder::new()
                       .name(format!("Processor #{}", processor_id))
                       .spawn(move || {
-                          // Set to thread local
-                          PROCESSOR.with(|proc_ptr| unsafe { *proc_ptr.get() = &mut p });
-
+                          let mut p = Processor::set_and_get_tls(p);
                           if let Err(err) = p.schedule() {
                               panic!("Processor::schedule return Err: {:?}", err);
                           }
@@ -135,15 +140,11 @@ impl Processor {
         where M: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let mut p = Processor::new_with_neighbors(processor_id, sched, Vec::new());
+        let p = Processor::new_with_neighbors(processor_id, sched, Vec::new());
         let (msg, st) = (p.handle(), p.stealer());
         let (tx, rx) = ::std::sync::mpsc::channel();
         let hdl = Builder::new().name(format!("Processor #{}", processor_id)).spawn(move|| {
-            // Set to thread local
-            PROCESSOR.with(|proc_ptr| unsafe {
-                *proc_ptr.get() = &mut p
-            });
-
+            let mut p = Processor::set_and_get_tls(p);
             let wrapper = move|| {
                 let ret = unsafe { ::try(move|| f()) };
 
@@ -164,16 +165,22 @@ impl Processor {
         &*self.scheduler
     }
 
+    /// Get the thread local processor
+    #[inline]
+    pub fn current() -> Option<&'static mut Processor> {
+        PROCESSOR.with(|proc_opt| unsafe { (*proc_opt.get()).as_mut() })
+    }
+
     #[inline]
     // Get the current running coroutine
-    pub unsafe fn running(&mut self) -> Option<*mut Coroutine> {
+    pub fn running(&mut self) -> Option<*mut Coroutine> {
         self.cur_running
     }
 
-    /// Get the thread local processor
     #[inline]
-    pub fn current() -> &'static mut Processor {
-        PROCESSOR.with(|p| unsafe { &mut **p.get() })
+    // Get the current running coroutine
+    pub fn current_running() -> Option<*mut Coroutine> {
+        Processor::current().and_then(Processor::running)
     }
 
     #[inline]
@@ -188,7 +195,7 @@ impl Processor {
 
     #[inline]
     // Call by scheduler
-    pub unsafe fn ready(&mut self, coro_ptr: *mut Coroutine) {
+    pub fn ready(&mut self, coro_ptr: *mut Coroutine) {
         self.has_ready_tasks = true;
         self.queue_worker.push(SendableCoroutinePtr(coro_ptr));
     }
@@ -211,7 +218,7 @@ impl Processor {
     }
 
     #[inline]
-    unsafe fn run_with_all_local_tasks(&mut self, coro_ptr: *mut Coroutine) {
+    fn run_with_all_local_tasks(&mut self, coro_ptr: *mut Coroutine) {
         let mut hdl = coro_ptr;
         loop {
             let is_suspended = match self.resume(hdl) {
@@ -252,9 +259,7 @@ impl Processor {
         'outerloop: loop {
             // 1. Run all tasks in local queue
             if let Some(hdl) = self.queue_worker.pop() {
-                unsafe {
-                    self.run_with_all_local_tasks(hdl.0);
-                }
+                self.run_with_all_local_tasks(hdl.0);
             } else {
                 self.has_ready_tasks = false;
             }
@@ -266,10 +271,10 @@ impl Processor {
                     ProcMessage::Shutdown => {
                         self.destroy_all_coroutines();
                     }
-                    ProcMessage::Ready(SendableCoroutinePtr(ptr)) => unsafe {
+                    ProcMessage::Ready(SendableCoroutinePtr(ptr)) => {
                         self.ready(ptr);
                         self.has_ready_tasks = true;
-                    },
+                    }
                 }
             }
 
@@ -288,9 +293,7 @@ impl Processor {
             for idx in (0..self.neighbor_stealers.len()).map(|x| (x + rand_idx) % total_stealers) {
                 if let Stolen::Data(SendableCoroutinePtr(hdl)) = self.neighbor_stealers[idx]
                                                                      .steal() {
-                    unsafe {
-                        self.run_with_all_local_tasks(hdl);
-                    }
+                    self.run_with_all_local_tasks(hdl);
                     continue 'outerloop;
                 }
             }
@@ -312,9 +315,7 @@ impl Processor {
 
         // 1. Drain the work queue.
         if let Some(hdl) = self.queue_worker.pop() {
-            unsafe {
-                self.run_with_all_local_tasks(hdl.0);
-            }
+            self.run_with_all_local_tasks(hdl.0);
         }
     }
 

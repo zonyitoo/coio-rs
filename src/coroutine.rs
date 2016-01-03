@@ -40,8 +40,7 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
         func()
     };
 
-    let processor = Processor::current();
-    processor.yield_with(Ok(State::Finished));
+    Processor::current().unwrap().yield_with(Ok(State::Finished));
 
     unreachable!("Should not reach here");
 }

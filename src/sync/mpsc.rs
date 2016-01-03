@@ -47,9 +47,7 @@ impl<T> Sender<T> {
             Ok(..) => {
                 let mut wait_list = self.wait_list.lock().unwrap();
                 if let Some(coro) = wait_list.pop_front() {
-                    unsafe {
-                        Scheduler::ready(coro);
-                    }
+                    Scheduler::ready(coro);
                 }
                 Ok(())
             }
@@ -93,9 +91,8 @@ impl<T> Receiver<T> {
                 }
 
                 // 4. Push ourselves into the wait list
-                wait_list.push_back(unsafe {
-                    Processor::current().running().expect("A running coroutine is required!")
-                });
+                wait_list.push_back(Processor::current_running()
+                                        .expect("A running coroutine is required!"));
 
                 // 5. Release the wait list
             }
@@ -140,9 +137,7 @@ impl<T> SyncSender<T> {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                 if let Some(coro) = recv_wait_list.pop_front() {
-                    unsafe {
-                        Scheduler::ready(coro);
-                    }
+                    Scheduler::ready(coro);
                 }
                 Ok(())
             }
@@ -174,9 +169,8 @@ impl<T> SyncSender<T> {
                 }
 
                 // 4. Push ourselves into the wait list
-                send_wait_list.push_back(unsafe {
-                    Processor::current().running().expect("A running coroutine is required!")
-                });
+                send_wait_list.push_back(Processor::current_running()
+                                             .expect("A running coroutine is required!"));
 
                 // 5. Release the wait list
             }
@@ -202,9 +196,7 @@ impl<T> SyncReceiver<T> {
             Ok(t) => {
                 let mut send_wait_list = self.send_wait_list.lock().unwrap();
                 if let Some(coro) = send_wait_list.pop_front() {
-                    unsafe {
-                        Scheduler::ready(coro);
-                    }
+                    Scheduler::ready(coro);
                 }
                 Ok(t)
             }
@@ -234,9 +226,8 @@ impl<T> SyncReceiver<T> {
                 }
 
                 // 4. Push ourselves into the wait list
-                recv_wait_list.push_back(unsafe {
-                    Processor::current().running().expect("A running coroutine is required!")
-                });
+                recv_wait_list.push_back(Processor::current_running()
+                                             .expect("A running coroutine is required!"));
 
                 // 5. Release the wait list
             }
@@ -317,7 +308,7 @@ mod test {
                     });
                 }
 
-                Scheduler::instance().sleep_ms(100);
+                Scheduler::instance().unwrap().sleep_ms(100);
 
                 for i in 1..10 {
                     assert_eq!(rx.recv(), Ok(i));

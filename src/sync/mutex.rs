@@ -70,9 +70,8 @@ impl<T> Mutex<T> {
                 }
 
                 // 4. Add ourselves into the wait list
-                wait_list.push(unsafe {
-                    Processor::current().running().expect("A running coroutine is required!")
-                });
+                wait_list.push(Processor::current_running()
+                                   .expect("A running coroutine is required!"));
             }
 
             // 5. Yield
@@ -118,9 +117,7 @@ impl<'a, T: 'a> Drop for Guard<'a, T> {
         {
             let mut wait_list = self.mutex.wait_list.lock().unwrap();
             while let Some(coro) = wait_list.pop() {
-                unsafe {
-                    Scheduler::ready(coro);
-                }
+                Scheduler::ready(coro);
             }
         }
 
