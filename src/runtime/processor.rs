@@ -27,8 +27,8 @@ use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::io;
 use std::mem;
-use std::sync::Arc;
-use std::sync::mpsc::{self, Sender, Receiver};
+use std::ptr;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Builder};
 use std::time::Duration;
 
@@ -40,14 +40,23 @@ use coroutine::{self, Coroutine, State, Handle, SendableCoroutinePtr};
 use options::Options;
 use scheduler::Scheduler;
 
-thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
+// TODO:
+//  Reconsider making PROCESSOR a static object instead of a pointer.
+//  This would simplify storage of Processor and improve performance of Processor::current()
+// Blockers:
+//  - std::thread::LocalKeyState is unstable (to avoid triggering the lazy init.).
+//  - Investigate if LLVM generates dynamic or non-dynamic ELF TLS.
+//    "dynamic" TLS is allocated lazily at first access of the store (which is what we want)
+//    instead of being allocated statically for every thread.
+//    ELF TLS Paper: "ELF Handling For Thread-Local Storage".
+thread_local!(static PROCESSOR: UnsafeCell<*mut Processor> = UnsafeCell::new(ptr::null_mut()));
 
 #[derive(Debug)]
 pub struct ForceUnwind;
 
 /// Processing unit of a thread
 pub struct Processor {
-    scheduler: Arc<Scheduler>,
+    scheduler: *mut Scheduler,
 
     main_coro: Handle,
     cur_running: Option<*mut Coroutine>,
@@ -70,7 +79,7 @@ unsafe impl Send for Processor {}
 
 impl Processor {
     fn new_with_neighbors(_processor_id: usize,
-                          sched: Arc<Scheduler>,
+                          sched: *mut Scheduler,
                           neigh: Vec<Stealer<SendableCoroutinePtr>>)
                           -> Processor {
         let main_coro = unsafe { Coroutine::empty() };
@@ -99,28 +108,37 @@ impl Processor {
         }
     }
 
-    fn set_and_get_tls(p: Processor) -> &'static mut Processor {
-        PROCESSOR.with(move |proc_opt| unsafe {
-            *proc_opt.get() = Some(p);
-            (*proc_opt.get()).as_mut().unwrap()
+    fn set_tls(p: &mut Processor) {
+        PROCESSOR.with(|proc_opt| unsafe {
+            *proc_opt.get() = p;
+        })
+    }
+
+    fn unset_tls() {
+        PROCESSOR.with(|proc_opt| unsafe {
+            *proc_opt.get() = ptr::null_mut();
         })
     }
 
     #[inline]
     pub fn run_with_neighbors(processor_id: usize,
-                              sched: Arc<Scheduler>,
+                              sched: *mut Scheduler,
                               neigh: Vec<Stealer<SendableCoroutinePtr>>)
                               -> (thread::JoinHandle<()>,
                                   Sender<ProcMessage>,
                                   Stealer<SendableCoroutinePtr>) {
-        let p = Processor::new_with_neighbors(processor_id, sched, neigh);
+        let mut p = Processor::new_with_neighbors(processor_id, sched, neigh);
         let msg = p.handle();
         let st = p.stealer();
+
         let hdl = Builder::new()
                       .name(format!("Processor #{}", processor_id))
                       .spawn(move || {
-                          let mut p = Processor::set_and_get_tls(p);
-                          if let Err(err) = p.schedule() {
+                          Processor::set_tls(&mut p);
+                          let err = p.schedule();
+                          Processor::unset_tls();
+
+                          if let Err(err) = err {
                               panic!("Processor::schedule return Err: {:?}", err);
                           }
                       })
@@ -131,7 +149,7 @@ impl Processor {
 
     #[inline]
     pub fn run_main<M, T>(processor_id: usize,
-                          sched: Arc<Scheduler>,
+                          sched: *mut Scheduler,
                           f: M)
                           -> (thread::JoinHandle<()>,
                               Sender<ProcMessage>,
@@ -140,35 +158,49 @@ impl Processor {
         where M: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let p = Processor::new_with_neighbors(processor_id, sched, Vec::new());
+        let mut p = Processor::new_with_neighbors(processor_id, sched, Vec::new());
         let (msg, st) = (p.handle(), p.stealer());
         let (tx, rx) = ::std::sync::mpsc::channel();
-        let hdl = Builder::new().name(format!("Processor #{}", processor_id)).spawn(move|| {
-            let mut p = Processor::set_and_get_tls(p);
-            let wrapper = move|| {
-                let ret = unsafe { ::try(move|| f()) };
+
+        let hdl = Builder::new().name(format!("Processor #{}", processor_id)).spawn(move || {
+            Processor::set_tls(&mut p);
+
+            let wrapper = move || {
+                let ret = unsafe { ::try(move || f()) };
 
                 // No matter whether it is panicked or not, the result will be sent to the channel
                 let _ = tx.send(ret); // Just ignore if it failed
             };
             p.spawn_opts(Box::new(wrapper), Options::default());
 
-            if let Err(err) = p.schedule() {
+            let err = p.schedule();
+            Processor::unset_tls();
+
+            if let Err(err) = err {
                 panic!("Processor::schedule return Err: {:?}", err);
             }
         }).unwrap();
+
         (hdl, msg, st, rx)
     }
 
     #[inline]
     pub fn scheduler(&self) -> &Scheduler {
-        &*self.scheduler
+        unsafe { &*self.scheduler }
     }
 
     /// Get the thread local processor
     #[inline]
     pub fn current() -> Option<&'static mut Processor> {
-        PROCESSOR.with(|proc_opt| unsafe { (*proc_opt.get()).as_mut() })
+        PROCESSOR.with(|proc_opt| unsafe {
+            let p: *mut Processor = *proc_opt.get();
+
+            if p.is_null() {
+                None
+            } else {
+                Some(&mut *p)
+            }
+        })
     }
 
     #[inline]

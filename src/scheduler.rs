@@ -22,7 +22,6 @@
 //! Global coroutine scheduler
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc::{Sender, TryRecvError};
 use std::default::Default;
 use std::any::Any;
@@ -249,11 +248,10 @@ impl Scheduler {
     }
 
     /// Run the scheduler
-    pub fn run<M, R>(self, main_fn: M) -> Result<R, Box<Any + Send + 'static>>
+    pub fn run<M, R>(&mut self, main_fn: M) -> Result<R, Box<Any + Send + 'static>>
         where M: FnOnce() -> R + Send + 'static,
               R: Send + 'static
     {
-        let the_sched = Arc::new(self);
         let mut handles = Vec::new();
 
         let mut processor_handlers: Vec<Sender<ProcMessage>> = Vec::new();
@@ -262,7 +260,7 @@ impl Scheduler {
         // Run the main function
         let main_coro_hdl = {
             // The first worker
-            let (hdl, msg, st, main_hdl) = Processor::run_main(0, the_sched.clone(), main_fn);
+            let (hdl, msg, st, main_hdl) = Processor::run_main(0, self, main_fn);
             handles.push(hdl);
 
             processor_handlers.push(msg);
@@ -273,9 +271,9 @@ impl Scheduler {
 
         {
             // The others
-            for tid in 1..the_sched.expected_worker_count {
+            for tid in 1..self.expected_worker_count {
                 let (hdl, msg, st) = Processor::run_with_neighbors(tid,
-                                                                   the_sched.clone(),
+                                                                   self,
                                                                    processor_stealers.clone());
 
                 for msg in processor_handlers.iter() {
@@ -294,10 +292,8 @@ impl Scheduler {
         // The scheduler loop
         loop {
             {
-                let io_handler: &mut IoHandler = unsafe { &mut *the_sched.io_handler.get() };
-                let event_loop: &mut EventLoop<IoHandler> = unsafe {
-                    &mut *the_sched.eventloop.get()
-                };
+                let io_handler: &mut IoHandler = unsafe { &mut *self.io_handler.get() };
+                let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
 
                 event_loop.run_once(io_handler, Some(100)).unwrap();
             }
@@ -312,14 +308,14 @@ impl Scheduler {
 
                     {
                         let event_loop: &mut EventLoop<IoHandler> = unsafe {
-                            &mut *the_sched.eventloop.get()
+                            &mut *self.eventloop.get()
                         };
-                        let io_handler: &mut IoHandler = unsafe {
-                            &mut *the_sched.io_handler.get()
-                        };
+                        let io_handler: &mut IoHandler = unsafe { &mut *self.io_handler.get() };
                         io_handler.wakeup_all(event_loop);
                     }
 
+                    // NOTE: It's critical that all threads are joined since Processor
+                    // maintains a reference to this Scheduler using raw pointers.
                     for hdl in handles {
                         hdl.join().unwrap();
                     }
