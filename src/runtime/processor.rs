@@ -30,7 +30,6 @@ use std::mem;
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Builder};
-use std::time::Duration;
 
 use deque::{BufferPool, Stolen, Worker, Stealer};
 
@@ -330,10 +329,19 @@ impl Processor {
                 }
             }
 
-            // This sleep throttles this loop in case a Processor runs out of work.
-            // TODO: Replace this sleep by some mechanism capable of waking up
-            //       idle workers as soon as new work is available.
-            thread::sleep(Duration::from_millis(10));
+            // Wait forever until we got notified
+            if let Ok(msg) = self.chan_receiver.recv() {
+                match msg {
+                    ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
+                    ProcMessage::Shutdown => {
+                        self.destroy_all_coroutines();
+                    }
+                    ProcMessage::Ready(SendableCoroutinePtr(ptr)) => {
+                        self.ready(ptr);
+                        self.has_ready_tasks = true;
+                    }
+                }
+            };
         }
 
         self.is_scheduling = false;
