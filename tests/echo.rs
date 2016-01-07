@@ -11,69 +11,77 @@ use coio::net::{UnixStream, UnixListener};
 #[test]
 fn test_tcp_echo() {
 
-    Scheduler::new().run(move|| {
-        // Listener
-        let listen_fut = Scheduler::spawn(move|| {
-            let acceptor = TcpListener::bind("127.0.0.1:6789").unwrap();
-            let (mut stream, _) = acceptor.accept().unwrap();
+    Scheduler::new()
+        .run(move || {
+            // Listener
+            let listen_fut = Scheduler::spawn(move || {
+                let acceptor = TcpListener::bind("127.0.0.1:6789").unwrap();
+                let (mut stream, _) = acceptor.accept().unwrap();
 
-            let mut buf = [0u8; 1024];
-            while let Ok(len) = stream.read(&mut buf) {
-                if len == 0 {
-                    // EOF
-                    break;
+                let mut buf = [0u8; 1024];
+                while let Ok(len) = stream.read(&mut buf) {
+                    if len == 0 {
+                        // EOF
+                        break;
+                    }
+
+                    stream.write_all(&buf[..len])
+                          .and_then(|_| stream.flush())
+                          .unwrap();
                 }
+            });
 
-                stream.write_all(&buf[..len])
-                      .and_then(|_| stream.flush()).unwrap();
-            }
-        });
+            let sender_fut = Scheduler::spawn(move || {
+                let mut stream = TcpStream::connect("127.0.0.1:6789").unwrap();
+                stream.write_all(b"abcdefg")
+                      .and_then(|_| stream.flush())
+                      .unwrap();
 
-        let sender_fut = Scheduler::spawn(move|| {
-            let mut stream = TcpStream::connect("127.0.0.1:6789").unwrap();
-            stream.write_all(b"abcdefg")
-                  .and_then(|_| stream.flush()).unwrap();
+                let mut buf = [0u8; 1024];
+                let len = stream.read(&mut buf).unwrap();
 
-            let mut buf = [0u8; 1024];
-            let len = stream.read(&mut buf).unwrap();
+                stream.shutdown(Shutdown::Both).unwrap();
 
-            stream.shutdown(Shutdown::Both).unwrap();
+                assert_eq!(&buf[..len], b"abcdefg");
+            });
 
-            assert_eq!(&buf[..len], b"abcdefg");
-        });
-
-        listen_fut.join().unwrap();
-        sender_fut.join().unwrap();
-    }).unwrap();
+            listen_fut.join().unwrap();
+            sender_fut.join().unwrap();
+        })
+        .unwrap();
 
 }
 
 #[test]
 fn test_udp_echo() {
 
-    Scheduler::new().run(move|| {
-        // Listener
-        let listen_fut = Scheduler::spawn(move|| {
-            let acceptor = UdpSocket::bind("127.0.0.1:6789").unwrap();
+    Scheduler::new()
+        .run(move || {
+            const TEST_SLICE: &'static [u8] = b"abcdefg";
+            let acceptor = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let acceptor_addr = acceptor.local_addr().unwrap();
 
-            let mut buf = [0u8; 1024];
-            let (len, addr) = acceptor.recv_from(&mut buf).unwrap();
-            acceptor.send_to(&buf[..len], addr).unwrap();
-        });
+            // Listener
+            let listen_fut = Scheduler::spawn(move || {
+                let mut buf = [0u8; 1024];
+                let (len, addr) = acceptor.recv_from(&mut buf).unwrap();
+                acceptor.send_to(&buf[..len], addr).unwrap();
+            });
 
-        let sender_fut = Scheduler::spawn(move|| {
-            let sender = UdpSocket::bind("127.0.0.1:6780").unwrap();
+            let sender_fut = Scheduler::spawn(move || {
+                let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
-            let mut buf = [0u8; 1024];
-            sender.send_to(b"abcdefg", "127.0.0.1:6789").unwrap();
-            let (len, _) = sender.recv_from(&mut buf).unwrap();
+                let mut buf = [0u8; 1024];
+                sender.send_to(TEST_SLICE, acceptor_addr).unwrap();
+                let (len, _) = sender.recv_from(&mut buf).unwrap();
 
-            assert_eq!(&buf[..len], b"abcdefg");
-        });
+                assert_eq!(&buf[..len], TEST_SLICE);
+            });
 
-        listen_fut.join().unwrap();
-        sender_fut.join().unwrap();
-    }).unwrap();
+            listen_fut.join().unwrap();
+            sender_fut.join().unwrap();
+        })
+        .unwrap();
 
 }
 
@@ -82,34 +90,38 @@ fn test_udp_echo() {
 fn test_unix_socket_echo() {
     use std::fs;
 
-    Scheduler::new().run(move|| {
-        const FILE_PATH_STR: &'static str = "/tmp/coio-unix-socket-test.sock";
+    Scheduler::new()
+        .run(move || {
+            const FILE_PATH_STR: &'static str = "/tmp/coio-unix-socket-test.sock";
 
-        let _ = fs::remove_file(FILE_PATH_STR);
+            let _ = fs::remove_file(FILE_PATH_STR);
 
-        // Listener
-        let listen_fut = Scheduler::spawn(move|| {
-            let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
-            let mut stream = acceptor.accept().unwrap();
+            // Listener
+            let listen_fut = Scheduler::spawn(move || {
+                let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
+                let mut stream = acceptor.accept().unwrap();
 
-            let mut buf = [0u8; 1024];
-            let len = stream.read(&mut buf).unwrap();
-            stream.write_all(&buf[..len])
-                  .and_then(|_| stream.flush()).unwrap();
-        });
+                let mut buf = [0u8; 1024];
+                let len = stream.read(&mut buf).unwrap();
+                stream.write_all(&buf[..len])
+                      .and_then(|_| stream.flush())
+                      .unwrap();
+            });
 
-        let sender_fut = Scheduler::spawn(move|| {
-            let mut stream = UnixStream::connect(FILE_PATH_STR).unwrap();
-            stream.write_all(b"abcdefg")
-                  .and_then(|_| stream.flush()).unwrap();
+            let sender_fut = Scheduler::spawn(move || {
+                let mut stream = UnixStream::connect(FILE_PATH_STR).unwrap();
+                stream.write_all(b"abcdefg")
+                      .and_then(|_| stream.flush())
+                      .unwrap();
 
-            let mut buf = [0u8; 1024];
-            let len = stream.read(&mut buf).unwrap();
+                let mut buf = [0u8; 1024];
+                let len = stream.read(&mut buf).unwrap();
 
-            assert_eq!(&buf[..len], b"abcdefg");
-        });
+                assert_eq!(&buf[..len], b"abcdefg");
+            });
 
-        listen_fut.join().unwrap();
-        sender_fut.join().unwrap();
-    }).unwrap();
+            listen_fut.join().unwrap();
+            sender_fut.join().unwrap();
+        })
+        .unwrap();
 }

@@ -21,15 +21,14 @@
 
 //! Global coroutine scheduler
 
+use std::any::Any;
+use std::boxed::FnBox;
+use std::default::Default;
+use std::io;
+use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, TryRecvError};
-use std::default::Default;
-use std::any::Any;
-use std::io;
-use std::cell::UnsafeCell;
 use std::time::Duration;
-use std::boxed::FnBox;
-use std::mem;
 
 use deque::Stealer;
 
@@ -37,7 +36,7 @@ use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
 
 use runtime::processor::{Processor, ProcMessage};
-use coroutine::{Coroutine, SendableCoroutinePtr};
+use coroutine::{SendableCoroutinePtr, Handle};
 use options::Options;
 
 /// A handle that could join the coroutine
@@ -60,7 +59,7 @@ struct IoHandler {
     slab: Slab<Option<ReadyCallback<'static>>>,
 }
 
-type RegisterCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>, Token) + Send + 'a>;
+type RegisterCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>, Token) -> bool + Send + 'a>;
 type ReadyCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>) + Send + 'a>;
 
 struct IoHandlerMessage {
@@ -70,7 +69,7 @@ struct IoHandlerMessage {
 
 impl IoHandlerMessage {
     fn new<'scope, Reg, Ready>(reg: Reg, ready: Ready) -> IoHandlerMessage
-        where Reg: FnOnce(&mut EventLoop<IoHandler>, Token) + Send + 'scope,
+        where Reg: FnOnce(&mut EventLoop<IoHandler>, Token) -> bool + Send + 'scope,
               Ready: FnOnce(&mut EventLoop<IoHandler>) + Send + 'scope
     {
         let reg = unsafe {
@@ -129,9 +128,11 @@ impl Handler for IoHandler {
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
         self.slab
             .insert_with(move |token| {
-                let IoHandlerMessage { register, ready } = msg;
-                register.call_box((event_loop, token));
-                Some(ready)
+                if msg.register.call_box((event_loop, token)) {
+                    Some(msg.ready)
+                } else {
+                    None
+                }
             })
             .unwrap();
     }
@@ -159,8 +160,8 @@ pub struct Scheduler {
 
     // Mio event loop and the handler
     // It controls all I/O and timer waits
-    eventloop: UnsafeCell<EventLoop<IoHandler>>,
-    io_handler: UnsafeCell<IoHandler>,
+    event_loop: EventLoop<IoHandler>,
+    io_handler: IoHandler,
 }
 
 unsafe impl Send for Scheduler {}
@@ -173,8 +174,8 @@ impl Scheduler {
             work_counts: AtomicUsize::new(0),
             expected_worker_count: 1,
 
-            eventloop: UnsafeCell::new(EventLoop::new().unwrap()),
-            io_handler: UnsafeCell::new(IoHandler::new()),
+            event_loop: EventLoop::new().unwrap(),
+            io_handler: IoHandler::new(),
         }
     }
 
@@ -187,15 +188,13 @@ impl Scheduler {
 
     /// Get the global Scheduler
     #[doc(hidden)]
-    #[inline]
     pub fn instance() -> Option<&'static Scheduler> {
         Processor::current().and_then(|p| Some(p.scheduler()))
     }
 
     /// A coroutine is ready for schedule
     #[doc(hidden)]
-    #[inline]
-    pub fn ready(coro: *mut Coroutine) {
+    pub fn ready(coro: Handle) {
         Processor::current().unwrap().ready(coro);
     }
 
@@ -203,22 +202,17 @@ impl Scheduler {
     ///
     /// The coroutine will be destroy, make sure that the coroutine pointer is unique!
     #[doc(hidden)]
-    #[inline]
-    pub fn finished(coro_ptr: *mut Coroutine) {
+    pub fn finished(mut coro: Handle) {
         Scheduler::instance().unwrap().work_counts.fetch_sub(1, Ordering::SeqCst);
-
-        let boxed = unsafe { Box::from_raw(coro_ptr) };
-        drop(boxed);
+        coro.set_drop_allowed();
     }
 
     /// Total works
-    #[inline]
     pub fn work_count(&self) -> usize {
         self.work_counts.load(Ordering::SeqCst)
     }
 
     /// Spawn a new coroutine with default options
-    #[inline]
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
@@ -255,7 +249,7 @@ impl Scheduler {
         let mut handles = Vec::new();
 
         let mut processor_handlers: Vec<Sender<ProcMessage>> = Vec::new();
-        let mut processor_stealers: Vec<Stealer<SendableCoroutinePtr>> = Vec::new();
+        let mut processor_stealers: Vec<Stealer<Handle>> = Vec::new();
 
         // Run the main function
         let main_coro_hdl = {
@@ -291,28 +285,15 @@ impl Scheduler {
 
         // The scheduler loop
         loop {
-            {
-                let io_handler: &mut IoHandler = unsafe { &mut *self.io_handler.get() };
-                let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-
-                event_loop.run_once(io_handler, Some(100)).unwrap();
-            }
+            self.event_loop.run_once(&mut self.io_handler, Some(100)).unwrap();
 
             match main_coro_hdl.try_recv() {
                 Ok(main_ret) => {
-                    {
-                        for msg in processor_handlers.iter() {
-                            let _ = msg.send(ProcMessage::Shutdown);
-                        }
+                    for msg in processor_handlers.iter() {
+                        let _ = msg.send(ProcMessage::Shutdown);
                     }
 
-                    {
-                        let event_loop: &mut EventLoop<IoHandler> = unsafe {
-                            &mut *self.eventloop.get()
-                        };
-                        let io_handler: &mut IoHandler = unsafe { &mut *self.io_handler.get() };
-                        io_handler.wakeup_all(event_loop);
-                    }
+                    self.io_handler.wakeup_all(&mut self.event_loop);
 
                     // NOTE: It's critical that all threads are joined since Processor
                     // maintains a reference to this Scheduler using raw pointers.
@@ -331,102 +312,120 @@ impl Scheduler {
     }
 
     /// Suspend the current coroutine
-    #[inline]
     pub fn sched() {
         Processor::current().unwrap().sched();
     }
 
     /// Block the current coroutine
     #[inline]
-    pub fn block() {
-        Processor::current().unwrap().block();
+    pub fn take_current_coroutine<U, F>(f: F) -> U
+        where F: FnOnce(Handle) -> U
+    {
+        Processor::current().unwrap().take_current_coroutine(f)
     }
 }
 
+struct ResultWrapper(*mut io::Result<()>);
+unsafe impl Send for ResultWrapper {}
+unsafe impl Sync for ResultWrapper {}
+
 impl Scheduler {
-    fn get_processor_and_coroutine() -> io::Result<(&'static mut Processor, *mut Coroutine)> {
-        if let Some(processor) = Processor::current() {
-            if let Some(coroutine) = processor.running() {
-                return Ok((processor, coroutine));
-            }
-        };
-
-        Err(io::Error::new(io::ErrorKind::Other, "A running coroutine is required!"))
-    }
-
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
     pub fn wait_event<'scope, E: Evented>(&self,
                                           fd: &'scope E,
                                           interest: EventSet)
                                           -> io::Result<()> {
-        let (processor, ptr) = try!(Scheduler::get_processor_and_coroutine());
+        let mut ret = Ok(());
 
-        let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-        let proc_hdl = processor.handle();
-        let sendable_coro = SendableCoroutinePtr(ptr);
-        let channel = event_loop.channel();
+        Scheduler::take_current_coroutine(|coro| {
+            let proc_hdl1 = Processor::current().unwrap().handle();
+            let proc_hdl2 = proc_hdl1.clone();
+            let channel = self.event_loop.channel();
 
-        struct EventedWrapper<E: Evented>(*const E);
-        unsafe impl<E: Evented> Send for EventedWrapper<E> {}
-        unsafe impl<E: Evented> Sync for EventedWrapper<E> {}
+            struct EventedWrapper<E>(*const E);
+            unsafe impl<E> Send for EventedWrapper<E> {}
+            unsafe impl<E> Sync for EventedWrapper<E> {}
 
-        let fd1 = EventedWrapper(fd);
-        let fd2 = EventedWrapper(fd);
+            let fd1 = EventedWrapper(fd);
+            let fd2 = EventedWrapper(fd);
+            let ret1 = ResultWrapper(&mut ret);
+            let ret2 = ResultWrapper(&mut ret);
+            let coro1 = SendableCoroutinePtr(Box::into_raw(coro));
+            let coro2 = coro1;
 
-        let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token| {
-                                            let fd: &E = unsafe { &*fd1.0 };
-                                            evloop.register(fd,
-                                                            token,
-                                                            interest,
-                                                            PollOpt::edge() | PollOpt::oneshot())
-                                                  .unwrap();
-                                        },
-                                        move |evloop: &mut EventLoop<IoHandler>| {
-                                            proc_hdl.send(ProcMessage::Ready(sendable_coro))
-                                                    .unwrap();
+            let reg = move |evloop: &mut EventLoop<IoHandler>, token| {
+                let fd = unsafe { &*fd1.0 };
+                let ret = unsafe { &mut *ret1.0 };
+                let r = evloop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot());
 
-                                            if cfg!(not(any(target_os = "macos",
-                                                            target_os = "ios",
-                                                            target_os = "freebsd",
-                                                            target_os = "dragonfly",
-                                                            target_os = "netbsd"))) {
-                                                let fd: &E = unsafe { &*fd2.0 };
-                                                evloop.deregister(fd).unwrap();
-                                            }
-                                        });
-        channel.send(msg).unwrap();
+                match r {
+                    Ok(..) => true,
+                    Err(..) => {
+                        *ret = r;
+                        proc_hdl1.send(ProcMessage::Ready(unsafe { Box::from_raw(coro1.0) }))
+                                 .unwrap();
+                        false
+                    }
+                }
+            };
 
-        processor.block();
+            let ready = move |evloop: &mut EventLoop<IoHandler>| {
+                if cfg!(not(any(target_os = "macos",
+                                target_os = "ios",
+                                target_os = "freebsd",
+                                target_os = "dragonfly",
+                                target_os = "netbsd"))) {
+                    let fd = unsafe { &*fd2.0 };
+                    let ret = unsafe { &mut *ret2.0 };
+                    *ret = evloop.deregister(fd);
+                }
 
-        Ok(())
+                proc_hdl2.send(ProcMessage::Ready(unsafe { Box::from_raw(coro2.0) })).unwrap();
+            };
+
+            channel.send(IoHandlerMessage::new(reg, ready)).unwrap();
+        });
+
+        ret
     }
 
     /// Block the current coroutine until the specific time
     #[doc(hidden)]
-    pub fn sleep_ms(&self, delay: u64) {
-        if let Ok((processor, ptr)) = Scheduler::get_processor_and_coroutine() {
-            let event_loop: &mut EventLoop<IoHandler> = unsafe { &mut *self.eventloop.get() };
-            let proc_hdl = processor.handle();
-            let sendable_coro = SendableCoroutinePtr(ptr);
-            let channel = event_loop.channel();
+    pub fn sleep_ms(&self, delay: u64) -> io::Result<()> {
+        let mut ret = Ok(());
 
-            let msg = IoHandlerMessage::new(|evloop: &mut EventLoop<IoHandler>, token| {
-                                                evloop.timeout_ms(token, delay).unwrap();
-                                            },
-                                            move |_: &mut EventLoop<IoHandler>| {
-                                                proc_hdl.send(ProcMessage::Ready(sendable_coro))
-                                                        .unwrap();
-                                            });
-            channel.send(msg).unwrap();
+        Scheduler::take_current_coroutine(|coro| {
+            let proc_hdl = Processor::current().unwrap().handle();
+            let channel = self.event_loop.channel();
 
-            processor.block();
-        }
+            let ret1 = ResultWrapper(&mut ret);
+
+            let reg = |evloop: &mut EventLoop<IoHandler>, token| {
+                let ret = unsafe { &mut *ret1.0 };
+
+                match evloop.timeout_ms(token, delay) {
+                    Ok(..) => true,
+                    Err(..) => {
+                        *ret = Err(io::Error::new(io::ErrorKind::Other, "failed to add timer"));
+                        false
+                    }
+                }
+            };
+
+            let ready = move |_: &mut EventLoop<IoHandler>| {
+                proc_hdl.send(ProcMessage::Ready(coro)).unwrap();
+            };
+
+            channel.send(IoHandlerMessage::new(reg, ready)).unwrap();
+        });
+
+        ret
     }
 
     /// Block the current coroutine until the specific time
     #[doc(hidden)]
-    pub fn sleep(&self, delay: Duration) {
+    pub fn sleep(&self, delay: Duration) -> io::Result<()> {
         self.sleep_ms(delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000)
     }
 }

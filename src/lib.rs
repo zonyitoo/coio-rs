@@ -82,7 +82,7 @@ pub fn sched() {
 #[inline]
 pub fn sleep_ms(ms: u64) {
     if let Some(s) = Scheduler::instance() {
-        s.sleep_ms(ms);
+        s.sleep_ms(ms).unwrap();
     }
 }
 
@@ -90,7 +90,7 @@ pub fn sleep_ms(ms: u64) {
 #[inline]
 pub fn sleep(duration: Duration) {
     if let Some(s) = Scheduler::instance() {
-        s.sleep(duration);
+        s.sleep(duration).unwrap();
     }
 }
 

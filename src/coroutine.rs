@@ -19,9 +19,11 @@
 // IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use std::cell::UnsafeCell;
 use std::boxed::FnBox;
-use std::sync::Mutex;
+use std::cell::UnsafeCell;
+
+#[cfg(debug_assertions)]
+use std::thread;
 
 use libc;
 
@@ -40,7 +42,7 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
         func()
     };
 
-    Processor::current().unwrap().yield_with(Ok(State::Finished));
+    Processor::current().unwrap().yield_with(State::Finished);
 
     unreachable!("Should not reach here");
 }
@@ -48,19 +50,67 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
 pub type Handle = Box<Coroutine>;
 
 /// Coroutine is nothing more than a context and a stack
+#[cfg(debug_assertions)]
 pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
-    pub yield_lock: Mutex<()>,
+
+    pub drop_allowed: bool, // Set to true by Scheduler::finished()
+}
+
+#[cfg(not(debug_assertions))]
+pub struct Coroutine {
+    context: Context,
+    stack: Option<Stack>,
 }
 
 impl Coroutine {
-    pub unsafe fn empty() -> Handle {
+    #[cfg(not(debug_assertions))]
+    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
         Box::new(Coroutine {
-            context: Context::empty(),
-            stack: None,
-            yield_lock: Mutex::new(()),
+            context: ctx,
+            stack: stack,
         })
+    }
+
+    #[cfg(debug_assertions)]
+    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
+        let drop_allowed = stack.is_none();
+
+        Box::new(Coroutine {
+            context: ctx,
+            stack: stack,
+
+            drop_allowed: drop_allowed,
+        })
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub fn set_drop_allowed(&mut self) {}
+
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub fn set_drop_allowed(&mut self) {
+        self.drop_allowed = true;
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn check_drop_allowed(&self) {}
+
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn check_drop_allowed(&self) {
+        // If the stack is unwinding drop() might be called at a random location.
+        // ---> Ignore.
+        if thread::panicking() == false {
+            debug_assert!(self.drop_allowed == true);
+        }
+    }
+
+    pub unsafe fn empty() -> Handle {
+        Coroutine::new(Context::empty(), None)
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -68,15 +118,10 @@ impl Coroutine {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
 
-        let ctx = Context::new(coroutine_initialize,
-                               0,
-                               Box::into_raw(Box::new(f)) as *mut libc::c_void,
-                               &mut stack);
-        Box::new(Coroutine {
-            context: ctx,
-            stack: Some(stack),
-            yield_lock: Mutex::new(()),
-        })
+        let f = Box::into_raw(Box::new(f)) as *mut libc::c_void;
+        let ctx = Context::new(coroutine_initialize, 0, f, &mut stack);
+
+        Coroutine::new(ctx, Some(stack))
     }
 
     pub fn yield_to(&mut self, target: &Coroutine) {
@@ -86,6 +131,8 @@ impl Coroutine {
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
+        self.check_drop_allowed();
+
         match self.stack.take() {
             None => {}
             Some(st) => {
@@ -110,5 +157,4 @@ pub type Result<T> = ::std::result::Result<T, ()>;
 /// Sendable coroutine mutable pointer
 #[derive(Copy, Clone, Debug)]
 pub struct SendableCoroutinePtr(pub *mut Coroutine);
-
 unsafe impl Send for SendableCoroutinePtr {}

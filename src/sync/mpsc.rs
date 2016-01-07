@@ -28,15 +28,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
-use coroutine::Coroutine;
+use coroutine::Handle;
 use scheduler::Scheduler;
-use runtime::processor::Processor;
 
 #[derive(Clone)]
 pub struct Sender<T> {
     inner: mpsc::Sender<T>,
 
-    wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
+    wait_list: Arc<Mutex<VecDeque<Handle>>>,
 }
 
 unsafe impl<T: Send> Send for Sender<T> {}
@@ -59,7 +58,7 @@ impl<T> Sender<T> {
 pub struct Receiver<T> {
     inner: mpsc::Receiver<T>,
 
-    wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
+    wait_list: Arc<Mutex<VecDeque<Handle>>>,
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
@@ -70,35 +69,36 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
+        let mut r = self.try_recv();
+
         loop {
             // 1. Try receive
-            match self.try_recv() {
+            match r {
                 Ok(v) => return Ok(v),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
 
-            {
-                // 2. Lock the wait list
+            // 2. Yield
+            Scheduler::take_current_coroutine(|coro| {
+                // 3. Lock the wait list
                 let mut wait_list = self.wait_list.lock().unwrap();
 
-                // 3. Try to receive again, to ensure no one sent items into the queue while
+                // 4. Try to receive again, to ensure no one sent items into the queue while
                 //    we are locking the wait list
-                match self.try_recv() {
-                    Ok(v) => return Ok(v),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                r = self.try_recv();
+
+                match r {
+                    Err(TryRecvError::Empty) => {
+                        // 5.1. Push ourselves into the wait list
+                        wait_list.push_back(coro);
+                    }
+                    _ => {
+                        // 5.2. Success!
+                        Scheduler::ready(coro);
+                    }
                 }
-
-                // 4. Push ourselves into the wait list
-                wait_list.push_back(Processor::current_running()
-                                        .expect("A running coroutine is required!"));
-
-                // 5. Release the wait list
-            }
-
-            // 6. Yield
-            Scheduler::block();
+            });
         }
     }
 }
@@ -125,8 +125,8 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 pub struct SyncSender<T> {
     inner: mpsc::SyncSender<T>,
 
-    send_wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
-    recv_wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
+    send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
 }
 
 unsafe impl<T: Send> Send for SyncSender<T> {}
@@ -146,37 +146,30 @@ impl<T> SyncSender<T> {
     }
 
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        let mut t2 = t;
+        let mut r = self.try_send(t);
 
         loop {
-            // 1. Try send
-            match self.try_send(t2) {
+            match r {
                 Ok(..) => return Ok(()),
                 Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                Err(TrySendError::Full(e)) => t2 = e,
-            }
+                Err(TrySendError::Full(t)) => {
+                    r = Scheduler::take_current_coroutine(move |coro| {
+                        let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                        let r = self.try_send(t);
 
-            {
-                // 2. Lock the wait list
-                let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                        match r {
+                            Err(TrySendError::Full(..)) => {
+                                send_wait_list.push_back(coro);
+                            }
+                            _ => {
+                                Scheduler::ready(coro);
+                            }
+                        };
 
-                // 3. Try to send again, to ensure no one received items from the queue while
-                //    we are locking the wait list
-                match self.try_send(t2) {
-                    Ok(..) => return Ok(()),
-                    Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                    Err(TrySendError::Full(e)) => t2 = e,
+                        r
+                    });
                 }
-
-                // 4. Push ourselves into the wait list
-                send_wait_list.push_back(Processor::current_running()
-                                             .expect("A running coroutine is required!"));
-
-                // 5. Release the wait list
             }
-
-            // 6. Yield
-            Scheduler::block();
         }
     }
 }
@@ -184,8 +177,8 @@ impl<T> SyncSender<T> {
 pub struct SyncReceiver<T> {
     inner: mpsc::Receiver<T>,
 
-    send_wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
-    recv_wait_list: Arc<Mutex<VecDeque<*mut Coroutine>>>,
+    send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
 }
 
 unsafe impl<T: Send> Send for SyncReceiver<T> {}
@@ -205,35 +198,29 @@ impl<T> SyncReceiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
+        let mut r = self.try_recv();
+
         loop {
-            // 1. Try receive
-            match self.try_recv() {
+            match r {
                 Ok(v) => return Ok(v),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
 
-            {
-                // 2. Lock the wait list
+            Scheduler::take_current_coroutine(|coro| {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
 
-                // 3. Try to receive again, to ensure no one sent items into the queue while
-                //    we are locking the wait list
-                match self.try_recv() {
-                    Ok(v) => return Ok(v),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                r = self.try_recv();
+
+                match r {
+                    Err(TryRecvError::Empty) => {
+                        recv_wait_list.push_back(coro);
+                    }
+                    _ => {
+                        Scheduler::ready(coro);
+                    }
                 }
-
-                // 4. Push ourselves into the wait list
-                recv_wait_list.push_back(Processor::current_running()
-                                             .expect("A running coroutine is required!"));
-
-                // 5. Release the wait list
-            }
-
-            // 6. Yield
-            Scheduler::block();
+            });
         }
     }
 }
@@ -308,7 +295,7 @@ mod test {
                     });
                 }
 
-                Scheduler::instance().unwrap().sleep_ms(100);
+                Scheduler::instance().unwrap().sleep_ms(100).unwrap();
 
                 for i in 1..10 {
                     assert_eq!(rx.recv(), Ok(i));
