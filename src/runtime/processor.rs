@@ -303,11 +303,11 @@ impl Processor {
                 match msg {
                     ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                     ProcMessage::Shutdown => {
-                        self.destroy_all_coroutines();
+                        self.is_exiting = true;
+                        continue 'outerloop;
                     }
-                    ProcMessage::Ready(SendableCoroutinePtr(ptr)) => {
+                    ProcMessage::Ready(ptr) => {
                         self.ready(ptr);
-                        self.has_ready_tasks = true;
                     }
                 }
             };
