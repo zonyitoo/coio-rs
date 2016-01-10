@@ -23,12 +23,13 @@ fn main() {
             let _guard = Guard(cloned_counter);
 
             coio::sleep_ms(10_000);
-            println!("Not going to run this line");
+            unreachable!("Not going to run this line");
         });
 
         // Exit right now, which will cause the coroutine to be destroyed.
         panic!("Exit right now!!");
     });
 
-    assert!(result.is_err() && counter.load(Ordering::SeqCst) == 1);
+    assert!(result.is_err());
+    assert!(counter.load(Ordering::SeqCst) == 1);
 }

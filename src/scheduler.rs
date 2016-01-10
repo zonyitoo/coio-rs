@@ -290,7 +290,7 @@ impl Scheduler {
             match main_coro_hdl.try_recv() {
                 Ok(main_ret) => {
                     for msg in processor_handlers.iter() {
-                        let _ = msg.send(ProcMessage::Shutdown);
+                        msg.send(ProcMessage::Shutdown).unwrap();
                     }
 
                     self.io_handler.wakeup_all(&mut self.event_loop);
@@ -298,7 +298,7 @@ impl Scheduler {
                     // NOTE: It's critical that all threads are joined since Processor
                     // maintains a reference to this Scheduler using raw pointers.
                     for hdl in handles {
-                        hdl.join().unwrap();
+                        let _ = hdl.join();
                     }
 
                     return main_ret;

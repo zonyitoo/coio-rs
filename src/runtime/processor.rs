@@ -155,20 +155,24 @@ impl Processor {
         let (msg, st) = (p.handle(), p.stealer());
         let (tx, rx) = ::std::sync::mpsc::channel();
 
-        let hdl = Builder::new().name(format!("Processor #{}", processor_id)).spawn(move || {
-            Processor::set_tls(&mut p);
+        let hdl =
+            Builder::new()
+                .name(format!("Processor #{}", processor_id))
+                .spawn(move || {
+                    Processor::set_tls(&mut p);
 
-            let wrapper = move || {
-                let ret = unsafe { ::try(move || f()) };
+                    let wrapper = move || {
+                        let ret = unsafe { ::try(move || f()) };
 
-                // No matter whether it is panicked or not, the result will be sent to the channel
-                let _ = tx.send(ret); // Just ignore if it failed
-            };
-            p.spawn_opts(Box::new(wrapper), Options::default());
+                        // If sending fails Scheduler::run()'s loop would never quit --> unwrap.
+                        tx.send(ret).unwrap();
+                    };
+                    p.spawn_opts(Box::new(wrapper), Options::default());
 
-            p.schedule();
-            Processor::unset_tls();
-        }).unwrap();
+                    p.schedule();
+                    Processor::unset_tls();
+                })
+                .unwrap();
 
         (hdl, msg, st, rx)
     }
@@ -262,30 +266,30 @@ impl Processor {
 
             // 2. Check the mainbox
             {
-                let mut new_ready_tasks = false;
+                let mut resume_all_tasks = false;
 
                 while let Ok(msg) = self.chan_receiver.try_recv() {
-
                     match msg {
                         ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                         ProcMessage::Shutdown => {
                             self.is_exiting = true;
-                            continue 'outerloop;
+                            resume_all_tasks = true;
                         }
                         ProcMessage::Ready(hdl) => {
                             self.ready(hdl);
-                            new_ready_tasks = true;
+                            resume_all_tasks = true;
                         }
                     }
                 }
 
                 // Prefer running own tasks before stealing --> "continue" from anew.
-                if new_ready_tasks {
+                if resume_all_tasks {
                     continue;
                 }
             }
 
             // 3. Randomly steal from neighbors as a last measure.
+            // TODO: To improve cache locality foreign lists should be split in half or so instead.
             let rand_idx = self.rng.gen::<usize>();
             let total_stealers = self.neighbor_stealers.len();
 
@@ -299,6 +303,11 @@ impl Processor {
             }
 
             // Wait forever until we got notified
+            // TODO:
+            //   Could this be improved somehow?
+            //   Maybe by implementing a "processor-pool" akin to a thread-pool,
+            //   which would move park()ed Processors to a shared idle-queue.
+            //   Other Processors could then unpark() them as necessary in their own ready() method.
             if let Ok(msg) = self.chan_receiver.recv() {
                 match msg {
                     ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
@@ -306,8 +315,8 @@ impl Processor {
                         self.is_exiting = true;
                         continue 'outerloop;
                     }
-                    ProcMessage::Ready(ptr) => {
-                        self.ready(ptr);
+                    ProcMessage::Ready(hdl) => {
+                        self.ready(hdl);
                     }
                 }
             };
