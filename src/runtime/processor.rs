@@ -26,34 +26,34 @@ use std::any::Any;
 use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::mem;
-use std::ptr;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Weak};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Builder};
 
 use deque::{BufferPool, Stolen, Worker, Stealer};
-
 use rand;
 
 use coroutine::{Coroutine, State, Handle};
 use options::Options;
 use scheduler::Scheduler;
 
-// TODO:
-//  Reconsider making PROCESSOR a static object instead of a pointer.
-//  This would simplify storage of Processor and improve performance of Processor::current()
-// Blockers:
-//  - std::thread::LocalKeyState is unstable (to avoid triggering the lazy init.).
-//  - Investigate if LLVM generates dynamic or non-dynamic ELF TLS.
-//    "dynamic" TLS is allocated lazily at first access of the store (which is what we want)
-//    instead of being allocated statically for every thread.
-//    ELF TLS Paper: "ELF Handling For Thread-Local Storage".
-thread_local!(static PROCESSOR: UnsafeCell<*mut Processor> = UnsafeCell::new(ptr::null_mut()));
+thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
 #[derive(Debug)]
 pub struct ForceUnwind;
 
-/// Processing unit of a thread
+#[derive(Clone)]
 pub struct Processor {
+    inner: Arc<ProcessorInner>,
+}
+
+unsafe impl Send for Processor {}
+unsafe impl Sync for Processor {}
+
+/// Processing unit of a thread
+pub struct ProcessorInner {
+    // weak_self: WeakProcessor,
     scheduler: *mut Scheduler,
 
     // Stores the context of the Processor::schedule() loop.
@@ -68,7 +68,7 @@ pub struct Processor {
     rng: rand::XorShiftRng,
     queue_worker: Worker<Handle>,
     queue_stealer: Stealer<Handle>,
-    neighbor_stealers: Vec<Stealer<Handle>>,
+    neighbor_stealers: Vec<Stealer<Handle>>, // TODO: make it a Arc<Vec<>>
     take_coro_cb: Option<&'static mut FnMut(Handle)>,
 
     chan_sender: Sender<ProcMessage>,
@@ -77,47 +77,47 @@ pub struct Processor {
     is_exiting: bool,
 }
 
-unsafe impl Send for Processor {}
-
 impl Processor {
-    fn new_with_neighbors(_processor_id: usize,
-                          sched: *mut Scheduler,
-                          neigh: Vec<Stealer<Handle>>)
-                          -> Processor {
-        let main_coro = unsafe { Coroutine::empty() };
-
+    fn new_with_neighbors(sched: *mut Scheduler, neigh: Vec<Stealer<Handle>>) -> Processor {
         let (worker, stealer) = BufferPool::new().deque();
         let (tx, rx) = mpsc::channel();
 
-        Processor {
-            scheduler: sched,
+        let p = Processor {
+            inner: Arc::new(ProcessorInner {
+                // weak_self: unsafe { mem::zeroed() },
+                scheduler: sched,
 
-            main_coro: main_coro,
-            current_coro: None,
-            last_state: State::Suspended,
+                main_coro: unsafe { Coroutine::empty() },
+                current_coro: None,
+                last_state: State::Suspended,
 
-            rng: rand::weak_rng(),
-            queue_worker: worker,
-            queue_stealer: stealer,
-            neighbor_stealers: neigh,
-            take_coro_cb: None,
+                rng: rand::weak_rng(),
+                queue_worker: worker,
+                queue_stealer: stealer,
+                neighbor_stealers: neigh,
+                take_coro_cb: None,
 
-            chan_sender: tx,
-            chan_receiver: rx,
+                chan_sender: tx,
+                chan_receiver: rx,
 
-            is_exiting: false,
-        }
+                is_exiting: false,
+            }),
+        };
+
+        // {
+        //     let weak_self = WeakProcessor { inner: Arc::downgrade(&p.inner) };
+        //     let inner = p.deref_mut();
+        //     mem::forget(mem::replace(&mut inner.weak_self, weak_self));
+        // }
+
+        p
     }
 
-    fn set_tls(p: &mut Processor) {
+    fn set_tls(p: &Processor) {
         PROCESSOR.with(|proc_opt| unsafe {
-            *proc_opt.get() = p;
-        })
-    }
-
-    fn unset_tls() {
-        PROCESSOR.with(|proc_opt| unsafe {
-            *proc_opt.get() = ptr::null_mut();
+            // HACK: Wohooo!
+            let proc_opt = &mut *proc_opt.get();
+            *proc_opt = Some(p.clone());
         })
     }
 
@@ -125,7 +125,7 @@ impl Processor {
                               sched: *mut Scheduler,
                               neigh: Vec<Stealer<Handle>>)
                               -> (thread::JoinHandle<()>, Sender<ProcMessage>, Stealer<Handle>) {
-        let mut p = Processor::new_with_neighbors(processor_id, sched, neigh);
+        let mut p = Processor::new_with_neighbors(sched, neigh);
         let msg = p.handle();
         let st = p.stealer();
 
@@ -134,7 +134,6 @@ impl Processor {
                       .spawn(move || {
                           Processor::set_tls(&mut p);
                           p.schedule();
-                          Processor::unset_tls();
                       })
                       .unwrap();
 
@@ -151,7 +150,7 @@ impl Processor {
         where M: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let mut p = Processor::new_with_neighbors(processor_id, sched, Vec::new());
+        let mut p = Processor::new_with_neighbors(sched, Vec::new());
         let (msg, st) = (p.handle(), p.stealer());
         let (tx, rx) = ::std::sync::mpsc::channel();
 
@@ -170,7 +169,6 @@ impl Processor {
                     p.spawn_opts(Box::new(wrapper), Options::default());
 
                     p.schedule();
-                    Processor::unset_tls();
                 })
                 .unwrap();
 
@@ -181,17 +179,13 @@ impl Processor {
         unsafe { &*self.scheduler }
     }
 
-    /// Get the thread local processor
-    pub fn current() -> Option<&'static mut Processor> {
-        PROCESSOR.with(|proc_opt| unsafe {
-            let p: *mut Processor = *proc_opt.get();
+    pub unsafe fn mut_ptr(&self) -> *mut Processor {
+        mem::transmute(self)
+    }
 
-            if p.is_null() {
-                None
-            } else {
-                Some(&mut *p)
-            }
-        })
+    /// Get the thread local processor. NOT thread safe!
+    pub fn current() -> Option<Processor> {
+        PROCESSOR.with(|proc_opt| unsafe { (&*proc_opt.get()).clone() })
     }
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
@@ -324,8 +318,13 @@ impl Processor {
     }
 
     fn resume(&mut self, coro: Handle) {
-        self.current_coro = Some(coro);
-        self.main_coro.yield_to(&self.current_coro.as_ref().unwrap());
+        // HACK: See yield_with()
+        unsafe {
+            let current_coro: *const Coroutine = mem::transmute(coro.deref());
+
+            self.current_coro = Some(coro);
+            self.main_coro.yield_to(&*current_coro);
+        }
 
         let coro = self.current_coro.take().unwrap();
 
@@ -355,13 +354,61 @@ impl Processor {
     /// Yield the current running coroutine with specified result
     pub fn yield_with(&mut self, r: State) {
         self.last_state = r;
-        self.current_coro.as_mut().unwrap().yield_to(&self.main_coro);
 
-        // We are back!
-        // Exit right now!
+        // HACK:
+        // Circumvent borrowck with it's
+        //   "Cannot borrow `*self` as mutable because it is also borrowed as immutable"
+        // message, because WE know that it's safe but borrowck seemingly
+        // can't deal with deref() and deref_mut() that well.
+        // TODO: Someone fix this please?
+        unsafe {
+            let main_coro: *const Coroutine = mem::transmute(self.main_coro.deref());
+            self.current_coro.as_mut().unwrap().yield_to(&*main_coro);
+        }
+
+        // We are back! Exit right now!
         if self.is_exiting {
             panic!(ForceUnwind);
         }
+    }
+}
+
+impl Deref for Processor {
+    type Target = ProcessorInner;
+
+    #[inline]
+    fn deref(&self) -> &ProcessorInner {
+        self.inner.deref()
+    }
+}
+
+impl DerefMut for Processor {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut ProcessorInner {
+        unsafe { &mut *(self.inner.deref() as *const ProcessorInner as *mut ProcessorInner) }
+    }
+}
+
+impl PartialEq for Processor {
+    fn eq(&self, other: &Processor) -> bool {
+        (self as *const Processor) == (other as *const Processor)
+    }
+}
+
+impl Eq for Processor {}
+
+// For coroutine.rs
+#[derive(Clone)]
+pub struct WeakProcessor {
+    inner: Weak<ProcessorInner>,
+}
+
+unsafe impl Send for WeakProcessor {}
+unsafe impl Sync for WeakProcessor {}
+
+impl WeakProcessor {
+    pub fn upgrade(&self) -> Option<Processor> {
+        self.inner.upgrade().and_then(|p| Some(Processor { inner: p }))
     }
 }
 

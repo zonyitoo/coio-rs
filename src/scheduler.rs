@@ -27,10 +27,8 @@ use std::default::Default;
 use std::io;
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Sender, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
-
-use deque::Stealer;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
@@ -145,8 +143,7 @@ impl IoHandler {
 
     fn wakeup_all(&mut self, event_loop: &mut EventLoop<Self>) {
         for cb in self.slab.iter_mut() {
-            let cb = cb.take();
-            cb.unwrap().call_box((event_loop,));
+            cb.take().unwrap().call_box((event_loop,));
         }
 
         self.slab.clear();
@@ -189,13 +186,32 @@ impl Scheduler {
     /// Get the global Scheduler
     #[doc(hidden)]
     pub fn instance() -> Option<&'static Scheduler> {
-        Processor::current().and_then(|p| Some(p.scheduler()))
+        Processor::current().and_then(|p| unsafe { Some(mem::transmute(p.scheduler())) })
     }
 
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     pub fn ready(coro: Handle) {
-        Processor::current().unwrap().ready(coro);
+        let current = Processor::current();
+
+        if let Some(mut preferred) = coro.preferred_processor() {
+            if let Some(current) = current {
+                if preferred == current {
+                    // We're on the same thread ---> use the faster ready() method.
+                    return preferred.ready(coro);
+                }
+            }
+
+            let _ = preferred.handle().send(ProcMessage::Ready(coro));
+            return;
+        }
+
+        if let Some(mut current) = current {
+            return current.ready(coro);
+        }
+
+        // TODO: Should we drop() the coro instead of panic?
+        panic!("Processor missing");
     }
 
     /// A coroutine is finished
@@ -225,7 +241,7 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let processor = Processor::current().unwrap();
+        let mut processor = Processor::current().unwrap();
 
         processor.scheduler().work_counts.fetch_add(1, Ordering::SeqCst);
 
@@ -246,41 +262,34 @@ impl Scheduler {
         where M: FnOnce() -> R + Send + 'static,
               R: Send + 'static
     {
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(self.expected_worker_count);
+        let mut handlers = Vec::with_capacity(self.expected_worker_count);
+        let mut stealers = Vec::with_capacity(self.expected_worker_count);
 
-        let mut processor_handlers: Vec<Sender<ProcMessage>> = Vec::new();
-        let mut processor_stealers: Vec<Stealer<Handle>> = Vec::new();
-
-        // Run the main function
+        // The first worker (main function)
         let main_coro_hdl = {
-            // The first worker
             let (hdl, msg, st, main_hdl) = Processor::run_main(0, self, main_fn);
             handles.push(hdl);
-
-            processor_handlers.push(msg);
-            processor_stealers.push(st);
+            handlers.push(msg);
+            stealers.push(st);
 
             main_hdl
         };
 
-        {
-            // The others
-            for tid in 1..self.expected_worker_count {
-                let (hdl, msg, st) = Processor::run_with_neighbors(tid,
-                                                                   self,
-                                                                   processor_stealers.clone());
+        // The others
+        for tid in 1..self.expected_worker_count {
+            let (hdl, msg, st) = Processor::run_with_neighbors(tid, self, stealers.clone());
 
-                for msg in processor_handlers.iter() {
-                    if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
-                        error!("Error while sending NewNeighbor {:?}", err);
-                    }
+            // Notify previously created Processors of their new neighbor
+            for msg in handlers.iter() {
+                if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
+                    error!("Error while sending NewNeighbor {:?}", err);
                 }
-
-                handles.push(hdl);
-
-                processor_handlers.push(msg);
-                processor_stealers.push(st);
             }
+
+            handles.push(hdl);
+            handlers.push(msg);
+            stealers.push(st);
         }
 
         // The scheduler loop
@@ -289,7 +298,7 @@ impl Scheduler {
 
             match main_coro_hdl.try_recv() {
                 Ok(main_ret) => {
-                    for msg in processor_handlers.iter() {
+                    for msg in handlers.iter() {
                         msg.send(ProcMessage::Shutdown).unwrap();
                     }
 

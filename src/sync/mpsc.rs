@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
 use coroutine::Handle;
+use runtime::Processor;
 use scheduler::Scheduler;
 
 #[derive(Clone)]
@@ -69,36 +70,41 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        let mut r = self.try_recv();
+        if let Some(mut processor) = Processor::current() {
+            let mut r = self.try_recv();
 
-        loop {
-            // 1. Try receive
-            match r {
-                Ok(v) => return Ok(v),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-            }
-
-            // 2. Yield
-            Scheduler::take_current_coroutine(|coro| {
-                // 3. Lock the wait list
-                let mut wait_list = self.wait_list.lock().unwrap();
-
-                // 4. Try to receive again, to ensure no one sent items into the queue while
-                //    we are locking the wait list
-                r = self.try_recv();
-
+            loop {
+                // 1. Try receive
                 match r {
-                    Err(TryRecvError::Empty) => {
-                        // 5.1. Push ourselves into the wait list
-                        wait_list.push_back(coro);
-                    }
-                    _ => {
-                        // 5.2. Success!
-                        Scheduler::ready(coro);
-                    }
+                    Ok(v) => return Ok(v),
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
                 }
-            });
+
+                // 2. Yield
+                let processor_ptr = unsafe { processor.mut_ptr() };
+                processor.take_current_coroutine(|coro| {
+                    // 3. Lock the wait list
+                    let mut wait_list = self.wait_list.lock().unwrap();
+
+                    // 4. Try to receive again, to ensure no one sent items into the queue while
+                    //    we are locking the wait list
+                    r = self.try_recv();
+
+                    match r {
+                        Err(TryRecvError::Empty) => {
+                            // 5.1. Push ourselves into the wait list
+                            wait_list.push_back(coro);
+                        }
+                        _ => {
+                            // 5.2. Success!
+                            unsafe { &mut *processor_ptr }.ready(coro);
+                        }
+                    }
+                });
+            }
+        } else {
+            self.inner.recv()
         }
     }
 }

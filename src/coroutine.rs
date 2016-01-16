@@ -30,21 +30,19 @@ use libc;
 use context::{Context, Stack};
 use context::stack::StackPool;
 
-use runtime::processor::Processor;
+use runtime::processor::{Processor, WeakProcessor};
 use options::Options;
 
 thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPool::new()));
 
 /// Initialization function for make context
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
-    unsafe {
-        let func: Box<Box<FnBox()>> = Box::from_raw(f as *mut Box<FnBox()>);
-        func()
-    };
+    let f = unsafe { Box::from_raw(f as *mut Box<FnBox()>) };
 
+    f();
     Processor::current().unwrap().yield_with(State::Finished);
 
-    unreachable!("Should not reach here");
+    unreachable!();
 }
 
 pub type Handle = Box<Coroutine>;
@@ -54,32 +52,42 @@ pub type Handle = Box<Coroutine>;
 pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
+    preferred_processor: Option<WeakProcessor>,
 
-    pub drop_allowed: bool, // Set to true by Scheduler::finished()
+    drop_allowed: bool,
 }
 
 #[cfg(not(debug_assertions))]
 pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
+    preferred_processor: Option<WeakProcessor>,
 }
 
 impl Coroutine {
     #[cfg(not(debug_assertions))]
-    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
+    fn new(ctx: Context,
+           stack: Option<Stack>,
+           preferred_processor: Option<WeakProcessor>)
+           -> Handle {
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
+            preferred_processor: preferred_processor,
         })
     }
 
     #[cfg(debug_assertions)]
-    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
+    fn new(ctx: Context,
+           stack: Option<Stack>,
+           preferred_processor: Option<WeakProcessor>)
+           -> Handle {
         let drop_allowed = stack.is_none();
 
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
+            preferred_processor: preferred_processor,
 
             drop_allowed: drop_allowed,
         })
@@ -89,6 +97,7 @@ impl Coroutine {
     #[inline]
     pub fn set_drop_allowed(&mut self) {}
 
+    // called by Scheduler::finished()
     #[cfg(debug_assertions)]
     #[inline]
     pub fn set_drop_allowed(&mut self) {
@@ -110,7 +119,7 @@ impl Coroutine {
     }
 
     pub unsafe fn empty() -> Handle {
-        Coroutine::new(Context::empty(), None)
+        Coroutine::new(Context::empty(), None, None)
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -118,14 +127,22 @@ impl Coroutine {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
 
+        // NOTE:
+        //   We need to use Box<Box<FnBox()>> because Box<FnBox> uses a fat pointer
+        //   and is thus 2 pointers wide instead of one, which is why it
+        //   can't be transmuted to a single void pointer
         let f = Box::into_raw(Box::new(f)) as *mut libc::c_void;
         let ctx = Context::new(coroutine_initialize, 0, f, &mut stack);
 
-        Coroutine::new(ctx, Some(stack))
+        Coroutine::new(ctx, Some(stack), None)
     }
 
     pub fn yield_to(&mut self, target: &Coroutine) {
         Context::swap(&mut self.context, &target.context);
+    }
+
+    pub fn preferred_processor(&self) -> Option<Processor> {
+        self.preferred_processor.as_ref().and_then(|p| p.upgrade())
     }
 }
 
