@@ -71,6 +71,7 @@ impl<T> Receiver<T> {
 
     pub fn recv(&self) -> Result<T, RecvError> {
         if let Some(mut processor) = Processor::current() {
+            let processor_ptr = unsafe { processor.mut_ptr() };
             let mut r = self.try_recv();
 
             loop {
@@ -82,7 +83,6 @@ impl<T> Receiver<T> {
                 }
 
                 // 2. Yield
-                let processor_ptr = unsafe { processor.mut_ptr() };
                 processor.take_current_coroutine(|coro| {
                     // 3. Lock the wait list
                     let mut wait_list = self.wait_list.lock().unwrap();
@@ -152,29 +152,43 @@ impl<T> SyncSender<T> {
     }
 
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        let mut r = self.try_send(t);
+        if let Some(mut processor) = Processor::current() {
+            let processor_ptr = unsafe { processor.mut_ptr() };
+            let mut r = self.try_send(t);
 
-        loop {
-            match r {
-                Ok(..) => return Ok(()),
-                Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                Err(TrySendError::Full(t)) => {
-                    r = Scheduler::take_current_coroutine(move |coro| {
-                        let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                        let r = self.try_send(t);
+            loop {
+                match r {
+                    Ok(..) => return Ok(()),
+                    Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
+                    Err(TrySendError::Full(t)) => {
+                        r = processor.take_current_coroutine(move |coro| {
+                            let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                            let r = self.try_send(t);
 
-                        match r {
-                            Err(TrySendError::Full(..)) => {
-                                send_wait_list.push_back(coro);
-                            }
-                            _ => {
-                                Scheduler::ready(coro);
-                            }
-                        };
+                            match r {
+                                Err(TrySendError::Full(..)) => {
+                                    send_wait_list.push_back(coro);
+                                }
+                                _ => {
+                                    unsafe { &mut *processor_ptr }.ready(coro);
+                                }
+                            };
 
-                        r
-                    });
+                            r
+                        });
+                    }
                 }
+            }
+        } else {
+            match self.inner.send(t) {
+                Ok(..) => {
+                    let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                    if let Some(coro) = send_wait_list.pop_front() {
+                        Scheduler::ready(coro);
+                    }
+                    Ok(())
+                }
+                Err(err) => Err(err),
             }
         }
     }
@@ -204,29 +218,43 @@ impl<T> SyncReceiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        let mut r = self.try_recv();
+        if let Some(mut processor) = Processor::current() {
+            let processor_ptr = unsafe { processor.mut_ptr() };
+            let mut r = self.try_recv();
 
-        loop {
-            match r {
-                Ok(v) => return Ok(v),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-            }
-
-            Scheduler::take_current_coroutine(|coro| {
-                let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
-
-                r = self.try_recv();
-
+            loop {
                 match r {
-                    Err(TryRecvError::Empty) => {
-                        recv_wait_list.push_back(coro);
+                    Ok(v) => return Ok(v),
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                }
+
+                processor.take_current_coroutine(|coro| {
+                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+
+                    r = self.try_recv();
+
+                    match r {
+                        Err(TryRecvError::Empty) => {
+                            recv_wait_list.push_back(coro);
+                        }
+                        _ => {
+                            unsafe { &mut *processor_ptr }.ready(coro);
+                        }
                     }
-                    _ => {
+                });
+            }
+        } else {
+            match self.inner.recv() {
+                Ok(t) => {
+                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+                    if let Some(coro) = recv_wait_list.pop_front() {
                         Scheduler::ready(coro);
                     }
+                    Ok(t)
                 }
-            });
+                Err(err) => Err(err),
+            }
         }
     }
 }
@@ -255,20 +283,45 @@ pub fn sync_channel<T>(bound: usize) -> (SyncSender<T>, SyncReceiver<T>) {
 #[cfg(test)]
 mod test {
     use super::*;
-
     use scheduler::Scheduler;
 
     #[test]
     fn test_channel_basic() {
-        let (tx, rx) = channel();
-
         Scheduler::new()
             .run(move || {
-                tx.send(1).unwrap();
+                let (tx, rx) = channel();
+
+                {
+                    let tx = tx.clone();
+
+                    Scheduler::spawn(move || {
+                        assert_eq!(tx.send(1), Ok(()));
+                        assert_eq!(tx.send(2), Ok(()));
+                        assert_eq!(tx.send(3), Ok(()));
+                    });
+                }
+
+                assert_eq!(rx.try_recv(), Ok(1));
+                assert_eq!(rx.try_recv(), Ok(2));
+                assert_eq!(rx.try_recv(), Ok(3));
+
+                {
+                    let tx = tx.clone();
+
+                    Scheduler::spawn(move || {
+                        for i in 1..10 {
+                            assert_eq!(tx.send(i), Ok(()));
+                        }
+                    });
+                }
+
+                Scheduler::instance().unwrap().sleep_ms(100).unwrap();
+
+                for i in 1..10 {
+                    assert_eq!(rx.recv(), Ok(i));
+                }
             })
             .unwrap();
-
-        assert_eq!(1, rx.recv().unwrap());
     }
 
     #[test]
@@ -308,5 +361,39 @@ mod test {
                 }
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_channel_without_processor() {
+        let (tx1, rx1) = channel();
+        let (tx2, rx2) = channel();
+
+        assert_eq!(tx1.send(1), Ok(()));
+
+        Scheduler::new()
+            .run(move || {
+                assert_eq!(rx1.recv(), Ok(1));
+                assert_eq!(tx2.send(2), Ok(()));
+            })
+            .unwrap();
+
+        assert_eq!(rx2.recv(), Ok(2));
+    }
+
+    #[test]
+    fn test_sync_channel_without_processor() {
+        let (tx1, rx1) = sync_channel(1);
+        let (tx2, rx2) = sync_channel(1);
+
+        assert_eq!(tx1.send(1), Ok(()));
+
+        Scheduler::new()
+            .run(move || {
+                assert_eq!(rx1.recv(), Ok(1));
+                assert_eq!(tx2.send(2), Ok(()));
+            })
+            .unwrap();
+
+        assert_eq!(rx2.recv(), Ok(2));
     }
 }
