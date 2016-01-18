@@ -182,8 +182,8 @@ impl<T> SyncSender<T> {
         } else {
             match self.inner.send(t) {
                 Ok(..) => {
-                    let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                    if let Some(coro) = send_wait_list.pop_front() {
+                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+                    if let Some(coro) = recv_wait_list.pop_front() {
                         Scheduler::ready(coro);
                     }
                     Ok(())
@@ -247,8 +247,8 @@ impl<T> SyncReceiver<T> {
         } else {
             match self.inner.recv() {
                 Ok(t) => {
-                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
-                    if let Some(coro) = recv_wait_list.pop_front() {
+                    let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                    if let Some(coro) = send_wait_list.pop_front() {
                         Scheduler::ready(coro);
                     }
                     Ok(t)
@@ -282,6 +282,10 @@ pub fn sync_channel<T>(bound: usize) -> (SyncSender<T>, SyncReceiver<T>) {
 
 #[cfg(test)]
 mod test {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
     use scheduler::Scheduler;
 
@@ -367,16 +371,27 @@ mod test {
     fn test_channel_without_processor() {
         let (tx1, rx1) = channel();
         let (tx2, rx2) = channel();
+        let barrier = Arc::new(Barrier::new(2));
+
+        {
+            let barrier = barrier.clone();
+
+            thread::spawn(move || {
+                Scheduler::new()
+                    .run(move || {
+                        barrier.wait();
+                        assert_eq!(rx1.recv(), Ok(1));
+                        assert_eq!(tx2.send(2), Ok(()));
+                    })
+                    .unwrap();
+            });
+        }
+
+        // ensure that rx1.recv() above has been called
+        barrier.wait();
+        thread::sleep(Duration::from_millis(10));
 
         assert_eq!(tx1.send(1), Ok(()));
-
-        Scheduler::new()
-            .run(move || {
-                assert_eq!(rx1.recv(), Ok(1));
-                assert_eq!(tx2.send(2), Ok(()));
-            })
-            .unwrap();
-
         assert_eq!(rx2.recv(), Ok(2));
     }
 
@@ -384,16 +399,27 @@ mod test {
     fn test_sync_channel_without_processor() {
         let (tx1, rx1) = sync_channel(1);
         let (tx2, rx2) = sync_channel(1);
+        let barrier = Arc::new(Barrier::new(2));
+
+        {
+            let barrier = barrier.clone();
+
+            thread::spawn(move || {
+                Scheduler::new()
+                    .run(move || {
+                        barrier.wait();
+                        assert_eq!(rx1.recv(), Ok(1));
+                        assert_eq!(tx2.send(2), Ok(()));
+                    })
+                    .unwrap();
+            });
+        }
+
+        // ensure that rx1.recv() above has been called
+        barrier.wait();
+        thread::sleep(Duration::from_millis(10));
 
         assert_eq!(tx1.send(1), Ok(()));
-
-        Scheduler::new()
-            .run(move || {
-                assert_eq!(rx1.recv(), Ok(1));
-                assert_eq!(tx2.send(2), Ok(()));
-            })
-            .unwrap();
-
         assert_eq!(rx2.recv(), Ok(2));
     }
 }

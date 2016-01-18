@@ -66,28 +66,22 @@ pub struct Coroutine {
 
 impl Coroutine {
     #[cfg(not(debug_assertions))]
-    fn new(ctx: Context,
-           stack: Option<Stack>,
-           preferred_processor: Option<WeakProcessor>)
-           -> Handle {
+    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
-            preferred_processor: preferred_processor,
+            preferred_processor: None,
         })
     }
 
     #[cfg(debug_assertions)]
-    fn new(ctx: Context,
-           stack: Option<Stack>,
-           preferred_processor: Option<WeakProcessor>)
-           -> Handle {
+    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
         let drop_allowed = stack.is_none();
 
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
-            preferred_processor: preferred_processor,
+            preferred_processor: None,
 
             drop_allowed: drop_allowed,
         })
@@ -119,7 +113,7 @@ impl Coroutine {
     }
 
     pub unsafe fn empty() -> Handle {
-        Coroutine::new(Context::empty(), None, None)
+        Coroutine::new(Context::empty(), None)
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -134,11 +128,15 @@ impl Coroutine {
         let f = Box::into_raw(Box::new(f)) as *mut libc::c_void;
         let ctx = Context::new(coroutine_initialize, 0, f, &mut stack);
 
-        Coroutine::new(ctx, Some(stack), None)
+        Coroutine::new(ctx, Some(stack))
     }
 
     pub fn yield_to(&mut self, target: &Coroutine) {
         Context::swap(&mut self.context, &target.context);
+    }
+
+    pub fn set_preferred_processor(&mut self, preferred_processor: Option<WeakProcessor>) {
+        self.preferred_processor = preferred_processor;
     }
 
     pub fn preferred_processor(&self) -> Option<Processor> {

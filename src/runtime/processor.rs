@@ -53,7 +53,7 @@ unsafe impl Sync for Processor {}
 
 /// Processing unit of a thread
 pub struct ProcessorInner {
-    // weak_self: WeakProcessor,
+    weak_self: WeakProcessor,
     scheduler: *mut Scheduler,
 
     // Stores the context of the Processor::schedule() loop.
@@ -82,9 +82,9 @@ impl Processor {
         let (worker, stealer) = BufferPool::new().deque();
         let (tx, rx) = mpsc::channel();
 
-        let p = Processor {
+        let mut p = Processor {
             inner: Arc::new(ProcessorInner {
-                // weak_self: unsafe { mem::zeroed() },
+                weak_self: unsafe { mem::zeroed() },
                 scheduler: sched,
 
                 main_coro: unsafe { Coroutine::empty() },
@@ -104,11 +104,11 @@ impl Processor {
             }),
         };
 
-        // {
-        //     let weak_self = WeakProcessor { inner: Arc::downgrade(&p.inner) };
-        //     let inner = p.deref_mut();
-        //     mem::forget(mem::replace(&mut inner.weak_self, weak_self));
-        // }
+        {
+            let weak_self = WeakProcessor { inner: Arc::downgrade(&p.inner) };
+            let inner = p.deref_mut();
+            mem::forget(mem::replace(&mut inner.weak_self, weak_self));
+        }
 
         p
     }
@@ -222,7 +222,9 @@ impl Processor {
     }
 
     pub fn spawn_opts(&mut self, f: Box<FnBox()>, opts: Options) {
-        let new_coro = Coroutine::spawn_opts(f, opts);
+        let mut new_coro = Coroutine::spawn_opts(f, opts);
+        new_coro.set_preferred_processor(Some(self.weak_self.clone()));
+
         // NOTE: If Scheduler::spawn() is called we want to make
         // sure that the spawned coroutine is executed immediately.
         // TODO: Should we really do this?
@@ -269,8 +271,9 @@ impl Processor {
                             self.is_exiting = true;
                             resume_all_tasks = true;
                         }
-                        ProcMessage::Ready(hdl) => {
-                            self.ready(hdl);
+                        ProcMessage::Ready(mut coro) => {
+                            coro.set_preferred_processor(Some(self.weak_self.clone()));
+                            self.ready(coro);
                             resume_all_tasks = true;
                         }
                     }
@@ -309,8 +312,9 @@ impl Processor {
                         self.is_exiting = true;
                         continue 'outerloop;
                     }
-                    ProcMessage::Ready(hdl) => {
-                        self.ready(hdl);
+                    ProcMessage::Ready(mut coro) => {
+                        coro.set_preferred_processor(Some(self.weak_self.clone()));
+                        self.ready(coro);
                     }
                 }
             };
