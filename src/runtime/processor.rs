@@ -322,10 +322,9 @@ impl Processor {
     }
 
     fn resume(&mut self, coro: Handle) {
-        // HACK: See yield_with()
         unsafe {
-            let current_coro: *const Coroutine = mem::transmute(coro.deref());
-
+            let current_coro: *const Coroutine = &*coro;
+            
             self.current_coro = Some(coro);
             self.main_coro.yield_to(&*current_coro);
         }
@@ -359,14 +358,8 @@ impl Processor {
     pub fn yield_with(&mut self, r: State) {
         self.last_state = r;
 
-        // HACK:
-        // Circumvent borrowck with it's
-        //   "Cannot borrow `*self` as mutable because it is also borrowed as immutable"
-        // message, because WE know that it's safe but borrowck seemingly
-        // can't deal with deref() and deref_mut() that well.
-        // TODO: Someone fix this please?
         unsafe {
-            let main_coro: *const Coroutine = mem::transmute(self.main_coro.deref());
+            let main_coro: *const Coroutine = &*self.main_coro;
             self.current_coro.as_mut().unwrap().yield_to(&*main_coro);
         }
 
