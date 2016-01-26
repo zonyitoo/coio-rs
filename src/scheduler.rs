@@ -195,11 +195,9 @@ impl Scheduler {
         let current = Processor::current();
 
         if let Some(mut preferred) = coro.preferred_processor() {
-            if let Some(current) = current {
-                if preferred == current {
-                    // We're on the same thread ---> use the faster ready() method.
-                    return preferred.ready(coro);
-                }
+            if Some(&mut preferred) == current {
+                // We're on the same thread ---> use the faster ready() method.
+                return preferred.ready(coro);
             }
 
             let _ = preferred.handle().send(ProcMessage::Ready(coro));
@@ -321,8 +319,9 @@ impl Scheduler {
     }
 
     /// Suspend the current coroutine
+    #[inline]
     pub fn sched() {
-        Processor::current().unwrap().sched();
+        Processor::current().unwrap().sched()
     }
 
     /// Block the current coroutine
