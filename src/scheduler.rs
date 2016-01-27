@@ -302,6 +302,10 @@ impl Scheduler {
 
                     self.io_handler.wakeup_all(&mut self.event_loop);
 
+                    for msg in handlers.iter() {
+                        msg.send(ProcMessage::Exit).unwrap();
+                    }
+
                     // NOTE: It's critical that all threads are joined since Processor
                     // maintains a reference to this Scheduler using raw pointers.
                     for hdl in handles {

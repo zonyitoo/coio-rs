@@ -44,7 +44,10 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
 
         // f must be destroyed here or it will cause memory leaks
     }
-    Processor::current().unwrap().yield_with(State::Finished);
+
+    unsafe {
+        Processor::current().unwrap().coroutine_finish();
+    }
 
     unreachable!();
 }
@@ -93,6 +96,12 @@ impl Coroutine {
     pub fn yield_to(&mut self, state: State, target: &mut Coroutine) {
         self.set_state(state);
         target.set_state(State::Running);
+        unsafe {
+            self.raw_yield_to(target);
+        }
+    }
+
+    pub unsafe fn raw_yield_to(&mut self, target: &Coroutine) {
         Context::swap(&mut self.context, &target.context);
 
         if let State::ForceUnwinding = self.state() {
@@ -101,13 +110,11 @@ impl Coroutine {
     }
 
     #[inline]
-    fn force_unwind(&mut self) {
+    unsafe fn force_unwind(&mut self) {
         match self.state() {
             State::Initialized | State::Finished => {},
             _ => {
-                let mut dummy = unsafe { Coroutine::empty() };
-                self.set_state(State::ForceUnwinding);
-                Context::swap(&mut dummy.context, &self.context);
+                Processor::current().unwrap().toggle_unwinding(self);
             }
         }
     }
@@ -133,7 +140,9 @@ impl Coroutine {
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
-        self.force_unwind();
+        unsafe {
+            self.force_unwind();
+        }
 
         match self.stack.take() {
             None => {}

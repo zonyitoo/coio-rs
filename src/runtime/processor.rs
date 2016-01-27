@@ -227,16 +227,11 @@ impl Processor {
         'outerloop: loop {
             // 1. Run all tasks in local queue
             while let Some(hdl) = self.queue_worker.pop() {
-                self.resume(hdl);
-            }
-
-            // NOTE: It's important that this block comes right after the loop above.
-            // The chan_receiver loop below is the only place a Shutdown message can be received.
-            // Right after receiving one it will continue the 'outerloop from the beginning,
-            // resume() all coroutines in the queue_worker which will ForceUnwind
-            // and after that we exit the 'outerloop here.
-            if self.is_exiting {
-                break;
+                if !self.is_exiting {
+                    self.resume(hdl);
+                } else {
+                    drop(hdl);
+                }
             }
 
             // 2. Check the mainbox
@@ -251,9 +246,16 @@ impl Processor {
                             resume_all_tasks = true;
                         }
                         ProcMessage::Ready(mut coro) => {
-                            coro.set_preferred_processor(Some(self.weak_self.clone()));
-                            self.ready(coro);
-                            resume_all_tasks = true;
+                            if !self.is_exiting {
+                                coro.set_preferred_processor(Some(self.weak_self.clone()));
+                                self.ready(coro);
+                                resume_all_tasks = true;
+                            } else {
+                                drop(coro);
+                            }
+                        },
+                        ProcMessage::Exit => {
+                            break 'outerloop;
                         }
                     }
                 }
@@ -294,6 +296,9 @@ impl Processor {
                     ProcMessage::Ready(mut coro) => {
                         coro.set_preferred_processor(Some(self.weak_self.clone()));
                         self.ready(coro);
+                    },
+                    ProcMessage::Exit => {
+                        break 'outerloop;
                     }
                 }
             };
@@ -307,7 +312,8 @@ impl Processor {
             let current_coro: *mut Coroutine = &mut *coro;
 
             self.current_coro = Some(coro);
-            self.main_coro.yield_to(State::Suspended, &mut *current_coro);
+            // self.main_coro.yield_to(State::Suspended, &mut *current_coro);
+            self.raw_resume(&mut *current_coro);
         }
 
         let coro = self.current_coro.take().unwrap();
@@ -343,6 +349,33 @@ impl Processor {
         unsafe {
             let main_coro: *mut Coroutine = &mut *self.main_coro;
             self.current_coro.as_mut().unwrap().yield_to(r, &mut *main_coro);
+        }
+    }
+
+    #[doc(hidden)]
+    pub unsafe fn raw_resume(&mut self, target: &mut Coroutine) {
+        self.main_coro.yield_to(State::Suspended, target)
+    }
+
+    #[doc(hidden)]
+    pub unsafe fn toggle_unwinding(&mut self, target: &mut Coroutine) {
+        self.main_coro.set_state(State::Suspended);
+        target.set_state(State::ForceUnwinding);
+        self.main_coro.raw_yield_to(target);
+    }
+
+    #[doc(hiddle)]
+    pub unsafe fn coroutine_finish(&mut self) {
+        let main_coro: *mut Coroutine = &mut *self.main_coro;
+
+        match self.current_coro.as_mut() {
+            Some(current) => {
+                current.yield_to(State::Finished, &mut *main_coro);
+            }
+            None => {
+                let mut dummy = Coroutine::empty();
+                dummy.yield_to(State::Suspended, &mut *main_coro)
+            }
         }
     }
 }
@@ -387,9 +420,17 @@ impl WeakProcessor {
 }
 
 pub enum ProcMessage {
+    /// Got a new spawned neighbor
     NewNeighbor(Stealer<Handle>),
+
+    /// Got a new ready coroutine
     Ready(Handle),
+
+    /// Ask the processor to shutdown, which will going to force unwind all pending coroutines.
     Shutdown,
+
+    /// Exit the processor immediately.
+    Exit,
 }
 
 #[cfg(test)]
