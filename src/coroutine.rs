@@ -39,16 +39,13 @@ pub struct ForceUnwind;
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
     {
         let f = unsafe { Box::from_raw(f as *mut Box<FnBox()>) };
-
         f();
-
         // f must be destroyed here or it will cause memory leaks
     }
 
     unsafe {
         Processor::current().unwrap().coroutine_finish();
     }
-
     unreachable!();
 }
 
@@ -112,7 +109,7 @@ impl Coroutine {
     #[inline]
     unsafe fn force_unwind(&mut self) {
         match self.state() {
-            State::Initialized | State::Finished => {},
+            State::Initialized | State::Finished => {}
             _ => {
                 Processor::current().unwrap().toggle_unwinding(self);
             }
@@ -172,3 +169,42 @@ pub type Result<T> = ::std::result::Result<T, ()>;
 #[derive(Copy, Clone, Debug)]
 pub struct SendableCoroutinePtr(pub *mut Coroutine);
 unsafe impl Send for SendableCoroutinePtr {}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use scheduler::Scheduler;
+
+    #[test]
+    fn coroutine_unwinds_on_drop() {
+        let shared_usize = Arc::new(AtomicUsize::new(0));
+
+        {
+            let shared_usize = shared_usize.clone();
+
+            Scheduler::new()
+                .run(|| {
+                    let handle = Scheduler::spawn(|| {
+                        struct Test(Arc<AtomicUsize>);
+
+                        impl Drop for Test {
+                            fn drop(&mut self) {
+                                self.0.store(1, Ordering::SeqCst);
+                            }
+                        }
+
+                        let test = Test(shared_usize);
+                        Scheduler::take_current_coroutine(|_| {});
+                        test.0.store(2, Ordering::SeqCst);
+                    });
+
+                    let _ = handle.join();
+                })
+                .unwrap();
+        }
+
+        assert_eq!(shared_usize.load(Ordering::SeqCst), 1);
+    }
+}
