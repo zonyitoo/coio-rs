@@ -37,9 +37,13 @@ thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPo
 
 /// Initialization function for make context
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
-    let f = unsafe { Box::from_raw(f as *mut Box<FnBox()>) };
+    {
+        let f = unsafe { Box::from_raw(f as *mut Box<FnBox()>) };
 
-    f();
+        f();
+
+        // f must be destroyed here or it will cause memory leaks
+    }
     Processor::current().unwrap().yield_with(State::Finished);
 
     unreachable!();
