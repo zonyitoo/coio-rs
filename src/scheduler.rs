@@ -216,9 +216,9 @@ impl Scheduler {
     ///
     /// The coroutine will be destroy, make sure that the coroutine pointer is unique!
     #[doc(hidden)]
-    pub fn finished(mut coro: Handle) {
+    pub fn finished(coro: Handle) {
         Scheduler::instance().unwrap().work_counts.fetch_sub(1, Ordering::SeqCst);
-        coro.set_drop_allowed();
+        drop(coro);
     }
 
     /// Total works

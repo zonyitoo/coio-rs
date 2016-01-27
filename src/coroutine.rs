@@ -22,9 +22,6 @@
 use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 
-#[cfg(debug_assertions)]
-use std::thread;
-
 use libc;
 
 use context::{Context, Stack};
@@ -34,6 +31,9 @@ use runtime::processor::{Processor, WeakProcessor};
 use options::Options;
 
 thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPool::new()));
+
+#[derive(Debug)]
+pub struct ForceUnwind;
 
 /// Initialization function for make context
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
@@ -52,68 +52,23 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
 pub type Handle = Box<Coroutine>;
 
 /// Coroutine is nothing more than a context and a stack
-#[cfg(debug_assertions)]
 pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
     preferred_processor: Option<WeakProcessor>,
 
-    drop_allowed: bool,
-}
-
-#[cfg(not(debug_assertions))]
-pub struct Coroutine {
-    context: Context,
-    stack: Option<Stack>,
-    preferred_processor: Option<WeakProcessor>,
+    state: State,
 }
 
 impl Coroutine {
-    #[cfg(not(debug_assertions))]
     fn new(ctx: Context, stack: Option<Stack>) -> Handle {
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
             preferred_processor: None,
+
+            state: State::Initialized,
         })
-    }
-
-    #[cfg(debug_assertions)]
-    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
-        let drop_allowed = stack.is_none();
-
-        Box::new(Coroutine {
-            context: ctx,
-            stack: stack,
-            preferred_processor: None,
-
-            drop_allowed: drop_allowed,
-        })
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[inline]
-    pub fn set_drop_allowed(&mut self) {}
-
-    // called by Scheduler::finished()
-    #[cfg(debug_assertions)]
-    #[inline]
-    pub fn set_drop_allowed(&mut self) {
-        self.drop_allowed = true;
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[inline]
-    fn check_drop_allowed(&self) {}
-
-    #[cfg(debug_assertions)]
-    #[inline]
-    fn check_drop_allowed(&self) {
-        // If the stack is unwinding drop() might be called at a random location.
-        // ---> Ignore.
-        if thread::panicking() == false {
-            debug_assert!(self.drop_allowed == true);
-        }
     }
 
     pub unsafe fn empty() -> Handle {
@@ -135,8 +90,26 @@ impl Coroutine {
         Coroutine::new(ctx, Some(stack))
     }
 
-    pub fn yield_to(&mut self, target: &Coroutine) {
+    pub fn yield_to(&mut self, state: State, target: &mut Coroutine) {
+        self.set_state(state);
+        target.set_state(State::Running);
         Context::swap(&mut self.context, &target.context);
+
+        if let State::ForceUnwinding = self.state() {
+            panic!(ForceUnwind);
+        }
+    }
+
+    #[inline]
+    fn force_unwind(&mut self) {
+        match self.state() {
+            State::Initialized | State::Finished => {},
+            _ => {
+                let mut dummy = unsafe { Coroutine::empty() };
+                self.set_state(State::ForceUnwinding);
+                Context::swap(&mut dummy.context, &self.context);
+            }
+        }
     }
 
     pub fn set_preferred_processor(&mut self, preferred_processor: Option<WeakProcessor>) {
@@ -146,11 +119,21 @@ impl Coroutine {
     pub fn preferred_processor(&self) -> Option<Processor> {
         self.preferred_processor.as_ref().and_then(|p| p.upgrade())
     }
+
+    #[inline]
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    #[inline]
+    pub fn set_state(&mut self, state: State) {
+        self.state = state
+    }
 }
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
-        self.check_drop_allowed();
+        self.force_unwind();
 
         match self.stack.take() {
             None => {}
@@ -166,9 +149,12 @@ impl Drop for Coroutine {
 
 #[derive(Debug, Copy, Clone)]
 pub enum State {
+    Initialized,
     Suspended,
+    Running,
     Blocked,
     Finished,
+    ForceUnwinding,
 }
 
 pub type Result<T> = ::std::result::Result<T, ()>;

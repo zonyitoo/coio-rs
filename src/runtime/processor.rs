@@ -40,9 +40,6 @@ use scheduler::Scheduler;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
-#[derive(Debug)]
-pub struct ForceUnwind;
-
 #[derive(Clone)]
 pub struct Processor {
     inner: Arc<ProcessorInner>,
@@ -61,9 +58,6 @@ pub struct ProcessorInner {
 
     // NOTE: ONLY to be used by resume() and take_current_coroutine().
     current_coro: Option<Handle>,
-
-    // NOTE: ONLY to be used to communicate the result from yield_with() to resume().
-    last_state: State,
 
     rng: rand::XorShiftRng,
     queue_worker: Worker<Handle>,
@@ -89,7 +83,6 @@ impl Processor {
 
                 main_coro: unsafe { Coroutine::empty() },
                 current_coro: None,
-                last_state: State::Suspended,
 
                 rng: rand::weak_rng(),
                 queue_worker: worker,
@@ -229,6 +222,8 @@ impl Processor {
 
     /// Run the processor
     fn schedule(&mut self) {
+        self.main_coro.set_state(State::Running);
+
         'outerloop: loop {
             // 1. Run all tasks in local queue
             while let Some(hdl) = self.queue_worker.pop() {
@@ -303,19 +298,21 @@ impl Processor {
                 }
             };
         }
+
+        self.main_coro.set_state(State::Finished);
     }
 
-    fn resume(&mut self, coro: Handle) {
+    fn resume(&mut self, mut coro: Handle) {
         unsafe {
-            let current_coro: *const Coroutine = &*coro;
+            let current_coro: *mut Coroutine = &mut *coro;
 
             self.current_coro = Some(coro);
-            self.main_coro.yield_to(&*current_coro);
+            self.main_coro.yield_to(State::Suspended, &mut *current_coro);
         }
 
         let coro = self.current_coro.take().unwrap();
 
-        match self.last_state {
+        match coro.state() {
             State::Suspended => {
                 self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
             }
@@ -324,6 +321,9 @@ impl Processor {
             }
             State::Finished => {
                 Scheduler::finished(coro);
+            }
+            s => {
+                panic!("Impossible! The coroutine is yield with {:?}", s);
             }
         }
     }
@@ -340,16 +340,9 @@ impl Processor {
 
     /// Yield the current running coroutine with specified result
     pub fn yield_with(&mut self, r: State) {
-        self.last_state = r;
-
         unsafe {
-            let main_coro: *const Coroutine = &*self.main_coro;
-            self.current_coro.as_mut().unwrap().yield_to(&*main_coro);
-        }
-
-        // We are back! Exit right now!
-        if self.is_exiting {
-            panic!(ForceUnwind);
+            let main_coro: *mut Coroutine = &mut *self.main_coro;
+            self.current_coro.as_mut().unwrap().yield_to(r, &mut *main_coro);
         }
     }
 }
