@@ -295,35 +295,27 @@ mod test {
             .run(move || {
                 let (tx, rx) = channel();
 
-                {
-                    let tx = tx.clone();
+                let h = Scheduler::spawn(move || {
+                    assert_eq!(rx.try_recv(), Ok(1));
+                    assert_eq!(rx.try_recv(), Ok(2));
+                    assert_eq!(rx.try_recv(), Ok(3));
 
-                    Scheduler::spawn(move || {
-                        assert_eq!(tx.send(1), Ok(()));
-                        assert_eq!(tx.send(2), Ok(()));
-                        assert_eq!(tx.send(3), Ok(()));
-                    });
-                }
+                    for i in 1..10 {
+                        assert_eq!(rx.recv(), Ok(i));
+                    }
+                });
 
-                assert_eq!(rx.try_recv(), Ok(1));
-                assert_eq!(rx.try_recv(), Ok(2));
-                assert_eq!(rx.try_recv(), Ok(3));
+                assert_eq!(tx.send(1), Ok(()));
+                assert_eq!(tx.send(2), Ok(()));
+                assert_eq!(tx.send(3), Ok(()));
 
-                {
-                    let tx = tx.clone();
-
-                    Scheduler::spawn(move || {
-                        for i in 1..10 {
-                            assert_eq!(tx.send(i), Ok(()));
-                        }
-                    });
-                }
-
-                Scheduler::instance().unwrap().sleep_ms(100).unwrap();
+                Scheduler::sched();
 
                 for i in 1..10 {
-                    assert_eq!(rx.recv(), Ok(i));
+                    assert_eq!(tx.send(i), Ok(()));
                 }
+
+                h.join().unwrap();
             })
             .unwrap();
     }
@@ -334,35 +326,27 @@ mod test {
             .run(move || {
                 let (tx, rx) = sync_channel(2);
 
-                {
-                    let tx = tx.clone();
+                let h = Scheduler::spawn(move || {
+                    assert_eq!(rx.try_recv(), Ok(1));
+                    assert_eq!(rx.try_recv(), Ok(2));
+                    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
 
-                    Scheduler::spawn(move || {
-                        assert_eq!(tx.try_send(1), Ok(()));
-                        assert_eq!(tx.try_send(2), Ok(()));
-                        assert_eq!(tx.try_send(3), Err(TrySendError::Full(3)));
-                    });
-                }
+                    for i in 1..10 {
+                        assert_eq!(rx.recv(), Ok(i));
+                    }
+                });
 
-                assert_eq!(rx.try_recv(), Ok(1));
-                assert_eq!(rx.try_recv(), Ok(2));
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+                assert_eq!(tx.try_send(1), Ok(()));
+                assert_eq!(tx.try_send(2), Ok(()));
+                assert_eq!(tx.try_send(3), Err(TrySendError::Full(3)));
 
-                {
-                    let tx = tx.clone();
-
-                    Scheduler::spawn(move || {
-                        for i in 1..10 {
-                            assert_eq!(tx.send(i), Ok(()));
-                        }
-                    });
-                }
-
-                Scheduler::instance().unwrap().sleep_ms(100).unwrap();
+                Scheduler::sched();
 
                 for i in 1..10 {
-                    assert_eq!(rx.recv(), Ok(i));
+                    assert_eq!(tx.send(i), Ok(()));
                 }
+
+                h.join().unwrap();
             })
             .unwrap();
     }

@@ -3,19 +3,19 @@ extern crate coio;
 use std::io::{Read, Write};
 
 use coio::Scheduler;
-use coio::net::{TcpListener, TcpStream, UdpSocket, Shutdown};
+use coio::net::{TcpListener, TcpStream, UdpSocket};
 
 #[cfg(unix)]
 use coio::net::{UnixStream, UnixListener};
 
 #[test]
 fn test_tcp_echo() {
-
     Scheduler::new()
         .run(move || {
+            let acceptor = TcpListener::bind("127.0.0.1:6789").unwrap();
+
             // Listener
             let listen_fut = Scheduler::spawn(move || {
-                let acceptor = TcpListener::bind("127.0.0.1:6789").unwrap();
                 let (mut stream, _) = acceptor.accept().unwrap();
 
                 let mut buf = [0u8; 1024];
@@ -40,8 +40,6 @@ fn test_tcp_echo() {
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
 
-                stream.shutdown(Shutdown::Both).unwrap();
-
                 assert_eq!(&buf[..len], b"abcdefg");
             });
 
@@ -49,12 +47,10 @@ fn test_tcp_echo() {
             sender_fut.join().unwrap();
         })
         .unwrap();
-
 }
 
 #[test]
 fn test_udp_echo() {
-
     Scheduler::new()
         .run(move || {
             const TEST_SLICE: &'static [u8] = b"abcdefg";
@@ -82,7 +78,6 @@ fn test_udp_echo() {
             sender_fut.join().unwrap();
         })
         .unwrap();
-
 }
 
 #[cfg(unix)]
@@ -95,10 +90,10 @@ fn test_unix_socket_echo() {
             const FILE_PATH_STR: &'static str = "/tmp/coio-unix-socket-test.sock";
 
             let _ = fs::remove_file(FILE_PATH_STR);
+            let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
 
             // Listener
             let listen_fut = Scheduler::spawn(move || {
-                let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
                 let mut stream = acceptor.accept().unwrap();
 
                 let mut buf = [0u8; 1024];

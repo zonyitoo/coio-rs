@@ -19,7 +19,7 @@ time = "*"
 [dependencies]
 chrono = "^0.2.15"
 context = { git = "https://github.com/zonyitoo/context-rs.git" }
-deque = "^0.2.3"
+deque = "^0.3.1"
 libc = "^0.1.10"
 log = "^0.3.1"
 mio = "^0.5.0"

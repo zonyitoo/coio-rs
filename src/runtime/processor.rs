@@ -31,7 +31,7 @@ use std::sync::{Arc, Weak};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Builder};
 
-use deque::{BufferPool, Stolen, Worker, Stealer};
+use deque::{self, Worker, Stealer, Stolen};
 use rand;
 
 use coroutine::{Coroutine, State, Handle};
@@ -79,7 +79,7 @@ pub struct ProcessorInner {
 
 impl Processor {
     fn new_with_neighbors(sched: *mut Scheduler, neigh: Vec<Stealer<Handle>>) -> Processor {
-        let (worker, stealer) = BufferPool::new().deque();
+        let (worker, stealer) = deque::new();
         let (tx, rx) = mpsc::channel();
 
         let mut p = Processor {
@@ -183,9 +183,9 @@ impl Processor {
         mem::transmute(self)
     }
 
-    /// Get the thread local processor. NOT thread safe!
-    pub fn current() -> Option<Processor> {
-        PROCESSOR.with(|proc_opt| unsafe { (&*proc_opt.get()).clone() })
+    /// Get the thread local processor.
+    pub fn current<'a>() -> Option<&'a mut Processor> {
+        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
     }
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
@@ -224,23 +224,7 @@ impl Processor {
     pub fn spawn_opts(&mut self, f: Box<FnBox()>, opts: Options) {
         let mut new_coro = Coroutine::spawn_opts(f, opts);
         new_coro.set_preferred_processor(Some(self.weak_self.clone()));
-
-        // NOTE: If Scheduler::spawn() is called we want to make
-        // sure that the spawned coroutine is executed immediately.
-        // TODO: Should we really do this?
-        if self.current_coro.is_some() {
-            // Circumvent borrowck
-            let queue_worker = &self.queue_worker as *const Worker<Handle>;
-
-            self.take_current_coroutine(|coro| unsafe {
-                // queue_worker.push() inserts at the front of the queue.
-                // --> Insert new_coro last to ensure that it's at the front of the queue.
-                (&*queue_worker).push(coro);
-                (&*queue_worker).push(new_coro);
-            });
-        } else {
-            self.ready(new_coro);
-        }
+        self.ready(new_coro);
     }
 
     /// Run the processor
@@ -324,7 +308,7 @@ impl Processor {
     fn resume(&mut self, coro: Handle) {
         unsafe {
             let current_coro: *const Coroutine = &*coro;
-            
+
             self.current_coro = Some(coro);
             self.main_coro.yield_to(&*current_coro);
         }
@@ -333,7 +317,7 @@ impl Processor {
 
         match self.last_state {
             State::Suspended => {
-                self.ready(coro);
+                self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
             }
             State::Blocked => {
                 self.take_coro_cb.take().unwrap()(coro);
@@ -413,4 +397,47 @@ pub enum ProcMessage {
     NewNeighbor(Stealer<Handle>),
     Ready(Handle),
     Shutdown,
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::{Arc, Mutex};
+    use std::ops::Deref;
+
+    use scheduler::Scheduler;
+
+    // Scheduler::spawn() must push the new coroutine at the head of the runqueue.
+    // Thus if we spawn a number of coroutines they will be executed in reverse order.
+    // This test will make sure that this is the case.
+    #[test]
+    fn processor_sched_order() {
+        Scheduler::new()
+            .run(|| {
+                //
+                let results = Arc::new(Mutex::new(Vec::with_capacity(5)));
+                let expected = vec![0, 3, 2, 1, 99];
+
+                for i in 1..4 {
+                    let results = results.clone();
+
+                    Scheduler::spawn(move || {
+                        let mut results = results.lock().unwrap();
+                        results.push(i);
+                    });
+                }
+
+                {
+                    let mut results = results.lock().unwrap();
+                    results.push(0);
+                }
+
+                Scheduler::sched();
+
+                let mut results = results.lock().unwrap();
+                results.push(99);
+
+                assert_eq!(results.deref(), &expected);
+            })
+            .unwrap();
+    }
 }
