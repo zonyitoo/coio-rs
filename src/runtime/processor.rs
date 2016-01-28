@@ -253,7 +253,7 @@ impl Processor {
                             } else {
                                 drop(coro);
                             }
-                        },
+                        }
                         ProcMessage::Exit => {
                             break 'outerloop;
                         }
@@ -296,7 +296,7 @@ impl Processor {
                     ProcMessage::Ready(mut coro) => {
                         coro.set_preferred_processor(Some(self.weak_self.clone()));
                         self.ready(coro);
-                    },
+                    }
                     ProcMessage::Exit => {
                         break 'outerloop;
                     }
