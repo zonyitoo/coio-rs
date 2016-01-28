@@ -37,10 +37,12 @@ pub struct ForceUnwind;
 
 /// Initialization function for make context
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
+    let coro: &mut Coroutine = unsafe { &mut *(f as *mut Coroutine) };
     {
-        let f = unsafe { Box::from_raw(f as *mut Box<FnBox()>) };
-        f();
-        // f must be destroyed here or it will cause memory leaks
+        let f = coro.runnable.take();
+        if let Some(f) = f {
+            f();
+        }
     }
 
     unsafe {
@@ -56,38 +58,40 @@ pub struct Coroutine {
     context: Context,
     stack: Option<Stack>,
     preferred_processor: Option<WeakProcessor>,
-
     state: State,
+    runnable: Option<Box<FnBox()>>,
 }
 
+unsafe impl Send for Coroutine {}
+
 impl Coroutine {
-    fn new(ctx: Context, stack: Option<Stack>) -> Handle {
+    fn new(ctx: Context, stack: Option<Stack>, runnable: Option<Box<FnBox()>>) -> Handle {
         Box::new(Coroutine {
             context: ctx,
             stack: stack,
             preferred_processor: None,
-
             state: State::Initialized,
+            runnable: runnable,
         })
     }
 
     pub unsafe fn empty() -> Handle {
-        Coroutine::new(Context::empty(), None)
+        Coroutine::new(Context::empty(), None, None)
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
-        let mut stack = STACK_POOL.with(|pool| unsafe {
+        let stack = STACK_POOL.with(|pool| unsafe {
             (&mut *pool.get()).take_stack(opts.stack_size)
         });
 
-        // NOTE:
-        //   We need to use Box<Box<FnBox()>> because Box<FnBox> uses a fat pointer
-        //   and is thus 2 pointers wide instead of one, which is why it
-        //   can't be transmuted to a single void pointer
-        let f = Box::into_raw(Box::new(f)) as *mut libc::c_void;
-        let ctx = Context::new(coroutine_initialize, 0, f, &mut stack);
-
-        Coroutine::new(ctx, Some(stack))
+        let mut coro = Coroutine::new(Context::empty(), Some(stack), Some(f));
+        let coro_ptr: *mut Coroutine = &mut *coro as *mut Coroutine;
+        let stack_ptr: *mut Stack = coro.stack.as_mut().unwrap();
+        coro.context.init_with(coroutine_initialize,
+                               0,
+                               coro_ptr as *mut libc::c_void,
+                               unsafe { &mut *stack_ptr });
+        coro
     }
 
     pub fn yield_to(&mut self, state: State, target: &mut Coroutine) {
@@ -103,16 +107,6 @@ impl Coroutine {
 
         if let State::ForceUnwinding = self.state() {
             panic!(ForceUnwind);
-        }
-    }
-
-    #[inline]
-    unsafe fn force_unwind(&mut self) {
-        match self.state() {
-            State::Initialized | State::Finished => {}
-            _ => {
-                Processor::current().unwrap().toggle_unwinding(self);
-            }
         }
     }
 
@@ -138,7 +132,12 @@ impl Coroutine {
 impl Drop for Coroutine {
     fn drop(&mut self) {
         unsafe {
-            self.force_unwind();
+            match self.state() {
+                State::Initialized | State::Finished => {}
+                _ => {
+                    Processor::current().unwrap().toggle_unwinding(self);
+                }
+            }
         }
 
         match self.stack.take() {
