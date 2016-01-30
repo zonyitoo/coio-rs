@@ -116,8 +116,8 @@ impl Builder {
 
     /// Names the coroutine-to-be. Currently the name is used for identification only in panic messages.
     #[inline]
-    pub fn name(mut self, name: Option<String>) -> Builder {
-        self.opts.name = name;
+    pub fn name(mut self, name: String) -> Builder {
+        self.opts.name = Some(name);
         self
     }
 
