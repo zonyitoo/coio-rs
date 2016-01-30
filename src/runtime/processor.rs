@@ -186,6 +186,8 @@ impl Processor {
     pub fn take_current_coroutine<U, F>(&mut self, f: F) -> U
         where F: FnOnce(Handle) -> U
     {
+        debug_assert!(self.current_coro.is_some(), "No coroutine is running yet");
+
         let mut f = Some(f);
         let mut r = None;
 
