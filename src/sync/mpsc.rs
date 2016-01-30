@@ -485,10 +485,10 @@ mod test {
 
     #[test]
     fn test_channel_passing_ring() {
-        Scheduler::new().with_workers(1).run(|| {
+        Scheduler::new().with_workers(10).run(|| {
             let (tx, mut rx) = channel();
 
-            for _ in 0..100 {
+            for _ in 0..10000 {
                 let (ltx, lrx) = channel();
                 Scheduler::spawn(move|| {
                     loop {
@@ -503,7 +503,7 @@ mod test {
                 rx = lrx;
             }
 
-            for i in 0..10 {
+            for i in 0..100 {
                 tx.send(i).unwrap();
                 let value = rx.recv().unwrap();
                 assert_eq!(i, value);
@@ -513,10 +513,10 @@ mod test {
 
     #[test]
     fn test_sync_channel_passing_ring() {
-        Scheduler::new().with_workers(1).run(|| {
+        Scheduler::new().with_workers(10).run(|| {
             let (tx, mut rx) = sync_channel(1);
 
-            for _ in 0..100 {
+            for _ in 0..1000 {
                 let (ltx, lrx) = sync_channel(1);
                 Scheduler::spawn(move|| {
                     loop {
