@@ -136,7 +136,6 @@ impl Coroutine {
             let mut dummy = Coroutine::empty_on_stack();
             target.set_state(state);
             dummy.raw_yield_to(target);
-            dummy.set_state(State::Finished);
         }
     }
 
@@ -177,14 +176,17 @@ impl Drop for Coroutine {
             match self.state() {
                 State::Initialized | State::Finished => {}
                 _ => {
-                    if let Some(p) = Processor::current() {
-                        trace!("Coroutine `{}` is force-unwinding with processors", self.name_or("<unnamed>"));
-                        p.toggle_unwinding(self);
-                    } else {
-                        // This would happen if all the processors are gone just before
-                        // the container that holding the Handle of this coroutine is dropping
-                        trace!("Coroutine `{}` is force-unwinding without processors", self.name_or("<unnamed>"));
-                        Coroutine::resume(State::ForceUnwinding, self);
+                    // Unwind the stack only if it actually has a stack!
+                    if self.stack.is_some() {
+                        if let Some(p) = Processor::current() {
+                            trace!("Coroutine `{}` is force-unwinding with processors", self.name_or("<unnamed>"));
+                            p.toggle_unwinding(self);
+                        } else {
+                            // This would happen if all the processors are gone just before
+                            // the container that holding the Handle of this coroutine is dropping
+                            trace!("Coroutine `{}` is force-unwinding without processors", self.name_or("<unnamed>"));
+                            Coroutine::resume(State::ForceUnwinding, self);
+                        }
                     }
                 }
             }

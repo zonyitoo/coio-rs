@@ -326,8 +326,6 @@ impl Processor {
         while let Some(hdl) = self.queue_worker.pop() {
             drop(hdl);
         }
-
-        self.main_coro.set_state(State::Finished);
     }
 
     fn resume(&mut self, mut coro: Handle) {
