@@ -46,7 +46,7 @@ fn main() {
                 info!("Accept connection: {:?}", addr);
 
                 Scheduler::spawn(move || {
-                    let mut buf = [0; 1024*16];
+                    let mut buf = [0; 1024 * 16];
 
                     loop {
                         debug!("Trying to Read...");

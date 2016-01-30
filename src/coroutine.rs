@@ -39,8 +39,7 @@ pub struct ForceUnwind;
 extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
     let coro: &mut Coroutine = unsafe { &mut *(f as *mut Coroutine) };
     {
-        let f = coro.runnable.take();
-        if let Some(f) = f {
+        if let Some(f) = coro.runnable.take() {
             f();
         }
     }
