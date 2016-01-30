@@ -46,7 +46,7 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
     }
 
     unsafe {
-        Processor::current().unwrap().coroutine_finish();
+        Processor::current().unwrap().coroutine_finish(coro);
     }
     unreachable!();
 }
@@ -152,7 +152,7 @@ impl Drop for Coroutine {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum State {
     Initialized,
     Suspended,

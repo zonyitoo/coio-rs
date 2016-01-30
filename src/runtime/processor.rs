@@ -308,6 +308,8 @@ impl Processor {
     }
 
     fn resume(&mut self, mut coro: Handle) {
+        debug_assert!(coro.state() != State::Finished, "Cannot resume a finished coroutine");
+
         unsafe {
             let current_coro: *mut Coroutine = &mut *coro;
 
@@ -365,18 +367,9 @@ impl Processor {
     }
 
     #[doc(hiddle)]
-    pub unsafe fn coroutine_finish(&mut self) {
+    pub unsafe fn coroutine_finish(&mut self, coro: &mut Coroutine) {
         let main_coro: *mut Coroutine = &mut *self.main_coro;
-
-        match self.current_coro.as_mut() {
-            Some(current) => {
-                current.yield_to(State::Finished, &mut *main_coro);
-            }
-            None => {
-                let mut dummy = Coroutine::empty();
-                dummy.yield_to(State::Suspended, &mut *main_coro)
-            }
-        }
+        coro.yield_to(State::Finished, &mut *main_coro);
     }
 }
 
