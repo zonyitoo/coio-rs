@@ -90,42 +90,48 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        if let Some(mut processor) = Processor::current() {
+        while let Some(mut processor) = Processor::current() {
             let processor_ptr = unsafe { processor.mut_ptr() };
+
+            // 1. Try to receive first
             let mut r = self.try_recv();
-
-            loop {
-                // 1. Try receive
-                match r {
-                    Ok(v) => return Ok(v),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(RecvError),
-                }
-
-                // 2. Yield
-                processor.take_current_coroutine(|coro| {
-                    // 3. Lock the wait list
-                    let mut wait_list = self.wait_list.lock().unwrap();
-
-                    // 4. Try to receive again, to ensure no one sent items into the queue while
-                    //    we are locking the wait list
-                    r = self.try_recv();
-
-                    match r {
-                        Err(TryRecvError::Empty) => {
-                            // 5.1. Push ourselves into the wait list
-                            wait_list.push_back(coro);
-                        }
-                        _ => {
-                            // 5.2. Success!
-                            unsafe { &mut *processor_ptr }.ready(coro);
-                        }
-                    }
-                });
+            match r {
+                Ok(v) => return Ok(v),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
-        } else {
-            self.inner.recv()
+
+            // 2. Yield
+            processor.take_current_coroutine(|coro| {
+                // 3. Lock the wait list
+                let mut wait_list = self.wait_list.lock().unwrap();
+
+                // 4. Try to receive again, to ensure no one sent items into the queue while
+                //    we are locking the wait list
+                r = self.try_recv();
+
+                match r {
+                    Err(TryRecvError::Empty) => {
+                        // 5.1. Push ourselves into the wait list
+                        wait_list.push_back(coro);
+                    }
+                    _ => {
+                        // 5.2. Success!
+                        unsafe { &mut *processor_ptr }.ready(coro);
+                    }
+                }
+            });
+
+            // 6. Check it again after being waken up (if 5.2 succeeded)
+            match r {
+                Ok(v) => return Ok(v),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
+            }
         }
+
+        // What? The processor is gone? Then fallback to blocking recv
+        self.inner.recv()
     }
 }
 
@@ -171,45 +177,53 @@ impl<T> SyncSender<T> {
         }
     }
 
-    pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        if let Some(mut processor) = Processor::current() {
+    pub fn send(&self, mut t: T) -> Result<(), SendError<T>> {
+        while let Some(mut processor) = Processor::current() {
             let processor_ptr = unsafe { processor.mut_ptr() };
             let mut r = self.try_send(t);
 
-            loop {
-                match r {
-                    Ok(..) => return Ok(()),
-                    Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                    Err(TrySendError::Full(t)) => {
-                        r = processor.take_current_coroutine(move |coro| {
-                            let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                            let r = self.try_send(t);
+            match r {
+                Ok(..) => return Ok(()),
+                Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
+                Err(TrySendError::Full(t)) => {
+                    r = processor.take_current_coroutine(move |coro| {
+                        let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                        let r = self.try_send(t);
 
-                            match r {
-                                Err(TrySendError::Full(..)) => {
-                                    send_wait_list.push_back(coro);
-                                }
-                                _ => {
-                                    unsafe { &mut *processor_ptr }.ready(coro);
-                                }
-                            };
+                        match r {
+                            Err(TrySendError::Full(..)) => {
+                                send_wait_list.push_back(coro);
+                            }
+                            _ => {
+                                unsafe { &mut *processor_ptr }.ready(coro);
+                            }
+                        };
 
-                            r
-                        });
-                    }
+                        r
+                    });
                 }
             }
-        } else {
-            match self.inner.as_ref().unwrap().send(t) {
-                Ok(..) => {
-                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
-                    if let Some(coro) = recv_wait_list.pop_front() {
-                        Scheduler::ready(coro);
-                    }
-                    Ok(())
+
+            match r {
+                Ok(..) => return Ok(()),
+                Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
+                Err(TrySendError::Full(t_bak)) => {
+                    t = t_bak; // Restore t
                 }
-                Err(err) => Err(err),
             }
+        }
+
+        // What? The processor is gone? Then use blocking send
+        match self.inner.as_ref().unwrap().send(t) {
+            Ok(..) => {
+                let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+                if let Some(coro) = recv_wait_list.pop_front() {
+                    // Wake them up ...
+                    Scheduler::ready(coro);
+                }
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -258,43 +272,48 @@ impl<T> SyncReceiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        if let Some(mut processor) = Processor::current() {
+        while let Some(mut processor) = Processor::current() {
             let processor_ptr = unsafe { processor.mut_ptr() };
             let mut r = self.try_recv();
 
-            loop {
+            match r {
+                Ok(v) => return Ok(v),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
+            }
+
+            processor.take_current_coroutine(|coro| {
+                let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+
+                r = self.try_recv();
+
                 match r {
-                    Ok(v) => return Ok(v),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(RecvError),
-                }
-
-                processor.take_current_coroutine(|coro| {
-                    let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
-
-                    r = self.try_recv();
-
-                    match r {
-                        Err(TryRecvError::Empty) => {
-                            recv_wait_list.push_back(coro);
-                        }
-                        _ => {
-                            unsafe { &mut *processor_ptr }.ready(coro);
-                        }
+                    Err(TryRecvError::Empty) => {
+                        recv_wait_list.push_back(coro);
                     }
-                });
-            }
-        } else {
-            match self.inner.as_ref().unwrap().recv() {
-                Ok(t) => {
-                    let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                    if let Some(coro) = send_wait_list.pop_front() {
-                        Scheduler::ready(coro);
+                    _ => {
+                        unsafe { &mut *processor_ptr }.ready(coro);
                     }
-                    Ok(t)
                 }
-                Err(err) => Err(err),
+            });
+
+            match r {
+                Ok(v) => return Ok(v),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
+        }
+
+        // What? The processor is gone? Then use blocking recv
+        match self.inner.as_ref().unwrap().recv() {
+            Ok(t) => {
+                let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                if let Some(coro) = send_wait_list.pop_front() {
+                    Scheduler::ready(coro);
+                }
+                Ok(t)
+            }
+            Err(err) => Err(err),
         }
     }
 }
