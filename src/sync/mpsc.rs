@@ -56,6 +56,21 @@ impl<T> Sender<T> {
     }
 }
 
+impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+        // Try to wake up all the pending coroutines if this is the last Sender.
+        // Because if this is the last Sender, there won't be another one to push
+        // items into this queue, so we have to wake the coroutine up explicitly,
+        // who ownes the other end of this channel.
+        if Arc::strong_count(&self.wait_list) <= 2 {
+            let mut wait_list = self.wait_list.lock().unwrap();
+            for hdl in wait_list.drain(..) {
+                Scheduler::ready(hdl);
+            }
+        }
+    }
+}
+
 pub struct Receiver<T> {
     inner: mpsc::Receiver<T>,
 
@@ -194,6 +209,21 @@ impl<T> SyncSender<T> {
     }
 }
 
+impl<T> Drop for SyncSender<T> {
+    fn drop(&mut self) {
+        // Try to wake up all the pending coroutines if this is the last SyncSender.
+        // Because if this is the last SyncSender, there won't be another one to push
+        // items into this queue, so we have to wake the coroutine up explicitly,
+        // who ownes the other end of this channel.
+        if Arc::strong_count(&self.recv_wait_list) <= 2 {
+            let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
+            for hdl in recv_wait_list.drain(..) {
+                Scheduler::ready(hdl);
+            }
+        }
+    }
+}
+
 pub struct SyncReceiver<T> {
     inner: mpsc::Receiver<T>,
 
@@ -255,6 +285,18 @@ impl<T> SyncReceiver<T> {
                 }
                 Err(err) => Err(err),
             }
+        }
+    }
+}
+
+impl<T> Drop for SyncReceiver<T> {
+    fn drop(&mut self) {
+        // Try to wake up all the pending coroutines if this is the last SyncReceiver.
+        // Because there won't be another one to push items into this queue, so we
+        // have to wake the coroutine up explicitly, who ownes the other end of this channel.
+        let mut send_wait_list = self.send_wait_list.lock().unwrap();
+        for hdl in send_wait_list.drain(..) {
+            Scheduler::ready(hdl);
         }
     }
 }
@@ -405,5 +447,61 @@ mod test {
 
         assert_eq!(tx1.send(1), Ok(()));
         assert_eq!(rx2.recv(), Ok(2));
+    }
+
+    #[test]
+    fn test_channel_passing_ring() {
+        Scheduler::new().with_workers(1).run(|| {
+            let (tx, mut rx) = channel();
+
+            for _ in 0..100 {
+                let (ltx, lrx) = channel();
+                Scheduler::spawn(move|| {
+                    loop {
+                        let value = match rx.recv() {
+                            Ok(v) => v,
+                            Err(..) => break,
+                        };
+                        ltx.send(value).unwrap();
+                    }
+                });
+
+                rx = lrx;
+            }
+
+            for i in 0..10 {
+                tx.send(i).unwrap();
+                let value = rx.recv().unwrap();
+                assert_eq!(i, value);
+            }
+        }).unwrap();
+    }
+
+    #[test]
+    fn test_sync_channel_passing_ring() {
+        Scheduler::new().with_workers(1).run(|| {
+            let (tx, mut rx) = sync_channel(1);
+
+            for _ in 0..100 {
+                let (ltx, lrx) = sync_channel(1);
+                Scheduler::spawn(move|| {
+                    loop {
+                        let value = match rx.recv() {
+                            Ok(v) => v,
+                            Err(..) => break,
+                        };
+                        ltx.send(value).unwrap();
+                    }
+                });
+
+                rx = lrx;
+            }
+
+            for i in 0..10 {
+                tx.send(i).unwrap();
+                let value = rx.recv().unwrap();
+                assert_eq!(i, value);
+            }
+        }).unwrap();
     }
 }

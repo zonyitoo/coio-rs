@@ -59,6 +59,7 @@ pub struct Coroutine {
     preferred_processor: Option<WeakProcessor>,
     state: State,
     runnable: Option<Box<FnBox()>>,
+    name: Option<String>,
 }
 
 unsafe impl Send for Coroutine {}
@@ -71,6 +72,7 @@ impl Coroutine {
             preferred_processor: None,
             state: State::Initialized,
             runnable: runnable,
+            name: None,
         })
     }
 
@@ -84,6 +86,7 @@ impl Coroutine {
         });
 
         let mut coro = Coroutine::new(Context::empty(), Some(stack), Some(f));
+        coro.name = opts.name;
         let coro_ptr: *mut Coroutine = &mut *coro as *mut Coroutine;
         let stack_ptr: *mut Stack = coro.stack.as_mut().unwrap();
         coro.context.init_with(coroutine_initialize,
@@ -126,10 +129,22 @@ impl Coroutine {
     pub fn set_state(&mut self, state: State) {
         self.state = state
     }
+
+    #[inline]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_ref().map(|x| &x[..])
+    }
+
+    #[inline]
+    pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.name().unwrap_or(default)
+    }
 }
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
+        trace!("Dropping Coroutine `{}`", self.name_or("<unnamed>"));
+
         unsafe {
             match self.state() {
                 State::Initialized | State::Finished => {}
