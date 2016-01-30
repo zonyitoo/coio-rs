@@ -22,8 +22,6 @@
 //! Processing unit of a thread
 
 use rand::Rng;
-use std::any::Any;
-use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -37,7 +35,6 @@ use deque::{self, Worker, Stealer, Stolen};
 use rand;
 
 use coroutine::{Coroutine, State, Handle};
-use options::Options;
 use scheduler::Scheduler;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
@@ -58,6 +55,12 @@ impl ProcMessageSender {
 
 unsafe impl Send for ProcMessageSender {}
 unsafe impl Sync for ProcMessageSender {}
+
+pub struct Machine {
+    pub thread_handle: thread::JoinHandle<()>,
+    pub processor_handle: ProcMessageSender,
+    pub stealer: Stealer<Handle>,
+}
 
 #[derive(Clone)]
 pub struct Processor {
@@ -100,7 +103,7 @@ impl ProcessorInner {
 }
 
 impl Processor {
-    fn new_with_neighbors(sched: *mut Scheduler, neigh: Vec<Stealer<Handle>>) -> Processor {
+    pub fn new(sched: *mut Scheduler, processor_id: usize) -> Machine {
         let (worker, stealer) = deque::new();
         let (tx, rx) = mpsc::channel();
 
@@ -115,7 +118,7 @@ impl Processor {
                 rng: rand::weak_rng(),
                 queue_worker: worker,
                 queue_stealer: stealer,
-                neighbor_stealers: neigh,
+                neighbor_stealers: Vec::new(),
                 take_coro_cb: None,
 
                 chan_sender: tx,
@@ -132,70 +135,26 @@ impl Processor {
             mem::forget(mem::replace(&mut inner.weak_self, weak_self));
         }
 
-        p
-    }
+        let processor_handle = p.handle();
+        let stealer = p.stealer();
 
-    fn set_tls(p: &Processor) {
-        PROCESSOR.with(|proc_opt| unsafe {
-            // HACK: Wohooo!
-            let proc_opt = &mut *proc_opt.get();
-            *proc_opt = Some(p.clone());
-        })
-    }
+        let thread_handle = Builder::new()
+                                .name(format!("Processor #{}", processor_id))
+                                .spawn(move || {
+                                    PROCESSOR.with(|proc_opt| unsafe {
+                                        let proc_opt = &mut *proc_opt.get();
+                                        *proc_opt = Some(p.clone());
+                                    });
 
-    pub fn run_with_neighbors(processor_id: usize,
-                              sched: *mut Scheduler,
-                              neigh: Vec<Stealer<Handle>>)
-                              -> (thread::JoinHandle<()>, ProcMessageSender, Stealer<Handle>) {
-        let mut p = Processor::new_with_neighbors(sched, neigh);
-        let msg = p.handle();
-        let st = p.stealer();
+                                    p.schedule();
+                                })
+                                .unwrap();
 
-        let hdl = Builder::new()
-                      .name(format!("Processor #{}", processor_id))
-                      .spawn(move || {
-                          Processor::set_tls(&mut p);
-                          p.thread_handle = Some(thread::current());
-                          p.schedule();
-                      })
-                      .unwrap();
-
-        (hdl, msg, st)
-    }
-
-    pub fn run_main<M, T>(processor_id: usize,
-                          sched: *mut Scheduler,
-                          f: M)
-                          -> (thread::JoinHandle<()>,
-                              ProcMessageSender,
-                              Stealer<Handle>,
-                              ::std::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>)
-        where M: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
-    {
-        let mut p = Processor::new_with_neighbors(sched, Vec::new());
-        let (msg, st) = (p.handle(), p.stealer());
-        let (tx, rx) = ::std::sync::mpsc::channel();
-
-        let hdl =
-            Builder::new()
-                .name(format!("Processor #{}", processor_id))
-                .spawn(move || {
-                    Processor::set_tls(&mut p);
-
-                    let wrapper = move || {
-                        let ret = unsafe { ::try(move || f()) };
-
-                        // If sending fails Scheduler::run()'s loop would never quit --> unwrap.
-                        tx.send(ret).unwrap();
-                    };
-                    p.spawn_opts(Box::new(wrapper), Options::new().name("<main>".to_owned()));
-
-                    p.schedule();
-                })
-                .unwrap();
-
-        (hdl, msg, st, rx)
+        Machine {
+            thread_handle: thread_handle,
+            processor_handle: processor_handle,
+            stealer: stealer,
+        }
     }
 
     pub fn scheduler(&self) -> &Scheduler {
@@ -209,6 +168,10 @@ impl Processor {
     /// Get the thread local processor.
     pub fn current<'a>() -> Option<&'a mut Processor> {
         PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
+    }
+
+    pub fn weak_self(&self) -> &WeakProcessor {
+        &self.weak_self
     }
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
@@ -247,12 +210,6 @@ impl Processor {
             inner: self.chan_sender.clone(),
             processor: self.inner.clone(),
         }
-    }
-
-    pub fn spawn_opts(&mut self, f: Box<FnBox()>, opts: Options) {
-        let mut new_coro = Coroutine::spawn_opts(f, opts);
-        new_coro.set_preferred_processor(Some(self.weak_self.clone()));
-        self.ready(new_coro);
     }
 
     /// Run the processor
@@ -329,7 +286,8 @@ impl Processor {
     }
 
     fn resume(&mut self, mut coro: Handle) {
-        debug_assert!(coro.state() != State::Finished, "Cannot resume a finished coroutine");
+        debug_assert!(coro.state() != State::Finished,
+                      "Cannot resume a finished coroutine");
 
         unsafe {
             let current_coro: *mut Coroutine = &mut *coro;
@@ -348,11 +306,9 @@ impl Processor {
             State::Blocked => {
                 self.take_coro_cb.take().unwrap()(coro);
             }
-            State::Finished => {
-                Scheduler::finished(coro);
-            }
+            State::Finished => {}
             s => {
-                panic!("Impossible! The coroutine is yield with {:?}", s);
+                panic!("Coroutine yielded with invalid state {:?}", s);
             }
         }
     }

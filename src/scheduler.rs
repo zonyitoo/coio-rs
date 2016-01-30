@@ -26,23 +26,32 @@ use std::boxed::FnBox;
 use std::default::Default;
 use std::io;
 use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
 
-use runtime::processor::{Processor, ProcMessage};
 use coroutine::{SendableCoroutinePtr, Handle, Coroutine, State};
 use options::Options;
+use runtime::processor::{Processor, ProcMessage};
+use sync::mpsc::Receiver;
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
-    result: ::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>,
+    result: Receiver<Result<T, Box<Any + Send + 'static>>>,
 }
 
 impl<T> JoinHandle<T> {
+    /// Tries to join with the coroutine.
+    pub fn try_join(&self) -> Option<Result<T, Box<Any + Send + 'static>>> {
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => panic!("Failed to receive from the channel"),
+        }
+    }
+
     /// Join the coroutine until it finishes.
     ///
     /// If it already finished, this method will return immediately.
@@ -152,7 +161,6 @@ impl IoHandler {
 
 /// Coroutine scheduler
 pub struct Scheduler {
-    work_counts: AtomicUsize,
     expected_worker_count: usize,
 
     // Mio event loop and the handler
@@ -168,7 +176,6 @@ impl Scheduler {
     /// Create a scheduler with default configurations
     pub fn new() -> Scheduler {
         Scheduler {
-            work_counts: AtomicUsize::new(0),
             expected_worker_count: 1,
 
             event_loop: EventLoop::new().unwrap(),
@@ -212,20 +219,6 @@ impl Scheduler {
         Coroutine::resume(State::Running, &mut *coro);
     }
 
-    /// A coroutine is finished
-    ///
-    /// The coroutine will be destroy, make sure that the coroutine pointer is unique!
-    #[doc(hidden)]
-    pub fn finished(coro: Handle) {
-        Scheduler::instance().unwrap().work_counts.fetch_sub(1, Ordering::SeqCst);
-        drop(coro);
-    }
-
-    /// Total works
-    pub fn work_count(&self) -> usize {
-        self.work_counts.load(Ordering::SeqCst)
-    }
-
     /// Spawn a new coroutine with default options
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
         where F: FnOnce() -> T + Send + 'static,
@@ -239,77 +232,89 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let mut processor = Processor::current().unwrap();
-
-        processor.scheduler().work_counts.fetch_add(1, Ordering::SeqCst);
-
+        let processor = Processor::current().unwrap();
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move || {
             let ret = unsafe { ::try(move || f()) };
 
             // No matter whether it is panicked or not, the result will be sent to the channel
-            let _ = tx.send(ret); // Just ignore if it failed
+            let _ = tx.send(ret);
         };
-        processor.spawn_opts(Box::new(wrapper), opts);
+
+        let mut new_coro = Coroutine::spawn_opts(Box::new(wrapper), opts);
+        new_coro.set_preferred_processor(Some(processor.weak_self().clone()));
+        processor.ready(new_coro);
 
         JoinHandle { result: rx }
     }
 
     /// Run the scheduler
-    pub fn run<M, R>(&mut self, main_fn: M) -> Result<R, Box<Any + Send + 'static>>
-        where M: FnOnce() -> R + Send + 'static,
-              R: Send + 'static
+    pub fn run<F, T>(&mut self, f: F) -> Result<T, Box<Any + Send>>
+        where F: FnOnce() -> T + Send,
+              T: Send
     {
-        let mut handles = Vec::with_capacity(self.expected_worker_count);
-        let mut handlers = Vec::with_capacity(self.expected_worker_count);
-        let mut stealers = Vec::with_capacity(self.expected_worker_count);
 
-        // The first worker (main function)
-        let main_coro_hdl = {
-            let (hdl, msg, st, main_hdl) = Processor::run_main(0, self, main_fn);
-            handles.push(hdl);
-            handlers.push(msg);
-            stealers.push(st);
+        let mut machines = Vec::with_capacity(self.expected_worker_count);
 
-            main_hdl
-        };
+        for tid in 0..self.expected_worker_count {
+            machines.push(Processor::new(self, tid));
+        }
 
-        // The others
-        for tid in 1..self.expected_worker_count {
-            let (hdl, msg, st) = Processor::run_with_neighbors(tid, self, stealers.clone());
-
-            // Notify previously created Processors of their new neighbor
-            for msg in handlers.iter() {
-                if let Err(err) = msg.send(ProcMessage::NewNeighbor(st.clone())) {
-                    error!("Error while sending NewNeighbor {:?}", err);
+        for x in 0..machines.len() {
+            for y in 0..machines.len() {
+                if x != y {
+                    machines[x]
+                        .processor_handle
+                        .send(ProcMessage::NewNeighbor(machines[y].stealer.clone()))
+                        .unwrap();
                 }
             }
+        }
 
-            handles.push(hdl);
-            handlers.push(msg);
-            stealers.push(st);
+        let main_coro_rx = {
+            let (tx, rx) = ::sync::mpsc::channel();
+            let wrapper = move || {
+                let ret = unsafe { ::try(move || f()) };
+                let _ = tx.send(ret);
+            };
+
+            let f: Box<FnBox()> = Box::new(wrapper);
+            let main_coro = Coroutine::spawn_opts(unsafe { mem::transmute(f) }, Default::default());
+            machines[0].processor_handle.send(ProcMessage::Ready(main_coro)).unwrap();
+
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                _ => panic!("nope"),
+            }
+
+            rx
+        };
+
+        match main_coro_rx.try_recv() {
+            Err(TryRecvError::Empty) => {}
+            _ => panic!("nope"),
         }
 
         // The scheduler loop
         loop {
             self.event_loop.run_once(&mut self.io_handler, Some(100)).unwrap();
 
-            match main_coro_hdl.try_recv() {
+            match main_coro_rx.try_recv() {
                 Ok(main_ret) => {
-                    for msg in handlers.iter() {
-                        msg.send(ProcMessage::Shutdown).unwrap();
+                    for m in machines.iter() {
+                        m.processor_handle.send(ProcMessage::Shutdown).unwrap();
                     }
 
                     self.io_handler.wakeup_all(&mut self.event_loop);
 
-                    for msg in handlers.iter() {
-                        msg.send(ProcMessage::Exit).unwrap();
+                    for m in machines.iter() {
+                        m.processor_handle.send(ProcMessage::Exit).unwrap();
                     }
 
                     // NOTE: It's critical that all threads are joined since Processor
                     // maintains a reference to this Scheduler using raw pointers.
-                    for hdl in handles {
-                        let _ = hdl.join();
+                    for m in machines.drain(..) {
+                        let _ = m.thread_handle.join();
                     }
 
                     return main_ret;
