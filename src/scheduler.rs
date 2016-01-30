@@ -34,7 +34,7 @@ use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt};
 use mio::util::Slab;
 
 use runtime::processor::{Processor, ProcMessage};
-use coroutine::{SendableCoroutinePtr, Handle};
+use coroutine::{SendableCoroutinePtr, Handle, Coroutine, State};
 use options::Options;
 
 /// A handle that could join the coroutine
@@ -191,7 +191,7 @@ impl Scheduler {
 
     /// A coroutine is ready for schedule
     #[doc(hidden)]
-    pub fn ready(coro: Handle) {
+    pub fn ready(mut coro: Handle) {
         let current = Processor::current();
 
         if let Some(mut preferred) = coro.preferred_processor() {
@@ -208,8 +208,8 @@ impl Scheduler {
             return current.ready(coro);
         }
 
-        // TODO: Should we drop() the coro instead of panic?
-        panic!("Processor missing");
+        // Resume it right here
+        Coroutine::resume(State::Running, &mut *coro);
     }
 
     /// A coroutine is finished

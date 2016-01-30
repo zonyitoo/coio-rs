@@ -21,6 +21,7 @@
 
 use std::boxed::FnBox;
 use std::cell::UnsafeCell;
+use std::ptr;
 
 use libc;
 
@@ -45,7 +46,10 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
     }
 
     unsafe {
-        Processor::current().unwrap().coroutine_finish(coro);
+        debug_assert!(coro.final_yield_to != ptr::null_mut(),
+                      "Final yield to target is a nullptr, which is impossible");
+        let final_yield_to: &mut Coroutine = &mut *coro.final_yield_to;
+        coro.yield_to(State::Finished, final_yield_to);
     }
     unreachable!();
 }
@@ -60,6 +64,7 @@ pub struct Coroutine {
     state: State,
     runnable: Option<Box<FnBox()>>,
     name: Option<String>,
+    final_yield_to: *mut Coroutine,
 }
 
 unsafe impl Send for Coroutine {}
@@ -73,11 +78,24 @@ impl Coroutine {
             state: State::Initialized,
             runnable: runnable,
             name: None,
+            final_yield_to: ptr::null_mut(),
         })
     }
 
     pub unsafe fn empty() -> Handle {
         Coroutine::new(Context::empty(), None, None)
+    }
+
+    unsafe fn empty_on_stack() -> Coroutine {
+        Coroutine {
+            context: Context::empty(),
+            stack: None,
+            preferred_processor: None,
+            state: State::Initialized,
+            runnable: None,
+            name: None,
+            final_yield_to: ptr::null_mut(),
+        }
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -104,11 +122,21 @@ impl Coroutine {
         }
     }
 
-    pub unsafe fn raw_yield_to(&mut self, target: &Coroutine) {
+    pub unsafe fn raw_yield_to(&mut self, target: &mut Coroutine) {
+        target.final_yield_to = self;
         Context::swap(&mut self.context, &target.context);
 
         if let State::ForceUnwinding = self.state() {
             panic!(ForceUnwind);
+        }
+    }
+
+    pub fn resume(state: State, target: &mut Coroutine) {
+        unsafe {
+            let mut dummy = Coroutine::empty_on_stack();
+            target.set_state(state);
+            dummy.raw_yield_to(target);
+            dummy.set_state(State::Finished);
         }
     }
 
@@ -143,13 +171,21 @@ impl Coroutine {
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
-        trace!("Dropping Coroutine `{}`", self.name_or("<unnamed>"));
+        trace!("Dropping Coroutine `{}` with state: {:?}", self.name_or("<unnamed>"), self.state());
 
         unsafe {
             match self.state() {
                 State::Initialized | State::Finished => {}
                 _ => {
-                    Processor::current().unwrap().toggle_unwinding(self);
+                    if let Some(p) = Processor::current() {
+                        trace!("Coroutine `{}` is force-unwinding with processors", self.name_or("<unnamed>"));
+                        p.toggle_unwinding(self);
+                    } else {
+                        // This would happen if all the processors are gone just before
+                        // the container that holding the Handle of this coroutine is dropping
+                        trace!("Coroutine `{}` is force-unwinding without processors", self.name_or("<unnamed>"));
+                        Coroutine::resume(State::ForceUnwinding, self);
+                    }
                 }
             }
         }

@@ -45,8 +45,8 @@ impl Options {
         self
     }
 
-    pub fn name(mut self, name: Option<String>) -> Options {
-        self.name = name;
+    pub fn name(mut self, name: String) -> Options {
+        self.name = Some(name);
         self
     }
 }

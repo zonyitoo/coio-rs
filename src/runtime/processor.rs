@@ -28,8 +28,10 @@ use std::cell::UnsafeCell;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, Builder};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SendError};
+use std::thread::{self, Builder, Thread};
+use std::time::Duration;
 
 use deque::{self, Worker, Stealer, Stolen};
 use rand;
@@ -39,6 +41,23 @@ use options::Options;
 use scheduler::Scheduler;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
+
+#[derive(Clone)]
+pub struct ProcMessageSender {
+    inner: Sender<ProcMessage>,
+    processor: Arc<ProcessorInner>,
+}
+
+impl ProcMessageSender {
+    pub fn send(&self, proc_msg: ProcMessage) -> Result<(), SendError<ProcMessage>> {
+        try!(self.inner.send(proc_msg));
+        self.processor.try_wake_up();
+        Ok(())
+    }
+}
+
+unsafe impl Send for ProcMessageSender {}
+unsafe impl Sync for ProcMessageSender {}
 
 #[derive(Clone)]
 pub struct Processor {
@@ -68,7 +87,16 @@ pub struct ProcessorInner {
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
 
-    is_exiting: bool,
+    thread_handle: Option<Thread>,
+    should_wake_up: AtomicBool,
+}
+
+impl ProcessorInner {
+    fn try_wake_up(&self) {
+        // This flag should always set to true when we have job to do
+        self.should_wake_up.store(true, Ordering::SeqCst);
+        self.thread_handle.as_ref().map(|x| x.unpark());
+    }
 }
 
 impl Processor {
@@ -93,7 +121,8 @@ impl Processor {
                 chan_sender: tx,
                 chan_receiver: rx,
 
-                is_exiting: false,
+                thread_handle: None,
+                should_wake_up: AtomicBool::new(false),
             }),
         };
 
@@ -117,7 +146,7 @@ impl Processor {
     pub fn run_with_neighbors(processor_id: usize,
                               sched: *mut Scheduler,
                               neigh: Vec<Stealer<Handle>>)
-                              -> (thread::JoinHandle<()>, Sender<ProcMessage>, Stealer<Handle>) {
+                              -> (thread::JoinHandle<()>, ProcMessageSender, Stealer<Handle>) {
         let mut p = Processor::new_with_neighbors(sched, neigh);
         let msg = p.handle();
         let st = p.stealer();
@@ -126,6 +155,7 @@ impl Processor {
                       .name(format!("Processor #{}", processor_id))
                       .spawn(move || {
                           Processor::set_tls(&mut p);
+                          p.thread_handle = Some(thread::current());
                           p.schedule();
                       })
                       .unwrap();
@@ -137,7 +167,7 @@ impl Processor {
                           sched: *mut Scheduler,
                           f: M)
                           -> (thread::JoinHandle<()>,
-                              Sender<ProcMessage>,
+                              ProcMessageSender,
                               Stealer<Handle>,
                               ::std::sync::mpsc::Receiver<Result<T, Box<Any + Send + 'static>>>)
         where M: FnOnce() -> T + Send + 'static,
@@ -159,7 +189,7 @@ impl Processor {
                         // If sending fails Scheduler::run()'s loop would never quit --> unwrap.
                         tx.send(ret).unwrap();
                     };
-                    p.spawn_opts(Box::new(wrapper), Options::default());
+                    p.spawn_opts(Box::new(wrapper), Options::new().name("<main>".to_owned()));
 
                     p.schedule();
                 })
@@ -212,8 +242,11 @@ impl Processor {
         self.queue_stealer.clone()
     }
 
-    pub fn handle(&self) -> Sender<ProcMessage> {
-        self.chan_sender.clone()
+    pub fn handle(&self) -> ProcMessageSender {
+        ProcMessageSender {
+            inner: self.chan_sender.clone(),
+            processor: self.inner.clone(),
+        }
     }
 
     pub fn spawn_opts(&mut self, f: Box<FnBox()>, opts: Options) {
@@ -229,11 +262,7 @@ impl Processor {
         'outerloop: loop {
             // 1. Run all tasks in local queue
             while let Some(hdl) = self.queue_worker.pop() {
-                if !self.is_exiting {
-                    self.resume(hdl);
-                } else {
-                    drop(hdl);
-                }
+                self.resume(hdl);
             }
 
             // 2. Check the mainbox
@@ -244,17 +273,12 @@ impl Processor {
                     match msg {
                         ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                         ProcMessage::Shutdown => {
-                            self.is_exiting = true;
                             resume_all_tasks = true;
                         }
                         ProcMessage::Ready(mut coro) => {
-                            if !self.is_exiting {
-                                coro.set_preferred_processor(Some(self.weak_self.clone()));
-                                self.ready(coro);
-                                resume_all_tasks = true;
-                            } else {
-                                drop(coro);
-                            }
+                            coro.set_preferred_processor(Some(self.weak_self.clone()));
+                            self.ready(coro);
+                            resume_all_tasks = true;
                         }
                         ProcMessage::Exit => {
                             break 'outerloop;
@@ -264,46 +288,43 @@ impl Processor {
 
                 // Prefer running own tasks before stealing --> "continue" from anew.
                 if resume_all_tasks {
-                    continue;
-                }
-            }
-
-            // 3. Randomly steal from neighbors as a last measure.
-            // TODO: To improve cache locality foreign lists should be split in half or so instead.
-            let rand_idx = self.rng.gen::<usize>();
-            let total_stealers = self.neighbor_stealers.len();
-
-            for idx in 0..total_stealers {
-                let idx = (rand_idx + idx) % total_stealers;
-
-                if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
-                    self.resume(hdl);
                     continue 'outerloop;
                 }
             }
 
-            // Wait forever until we got notified
-            // TODO:
-            //   Could this be improved somehow?
-            //   Maybe by implementing a "processor-pool" akin to a thread-pool,
-            //   which would move park()ed Processors to a shared idle-queue.
-            //   Other Processors could then unpark() them as necessary in their own ready() method.
-            if let Ok(msg) = self.chan_receiver.recv() {
-                match msg {
-                    ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
-                    ProcMessage::Shutdown => {
-                        self.is_exiting = true;
+            loop {
+                // 3. Randomly steal from neighbors as a last measure.
+                // TODO: To improve cache locality foreign lists should be split in half or so instead.
+                let rand_idx = self.rng.gen::<usize>();
+                let total_stealers = self.neighbor_stealers.len();
+
+                for idx in 0..total_stealers {
+                    let idx = (rand_idx + idx) % total_stealers;
+
+                    if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
+                        self.resume(hdl);
                         continue 'outerloop;
                     }
-                    ProcMessage::Ready(mut coro) => {
-                        coro.set_preferred_processor(Some(self.weak_self.clone()));
-                        self.ready(coro);
-                    }
-                    ProcMessage::Exit => {
-                        break 'outerloop;
-                    }
                 }
-            };
+
+                // Check once before park
+                if self.should_wake_up.swap(false, Ordering::SeqCst) {
+                    break;
+                }
+
+                thread::park_timeout(Duration::from_millis(100));
+
+                // If we are waken up, then break this loop
+                // otherwise, continue to steal jobs from the others
+                if self.should_wake_up.swap(false, Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }
+
+        // Clean up
+        while let Some(hdl) = self.queue_worker.pop() {
+            drop(hdl);
         }
 
         self.main_coro.set_state(State::Finished);
@@ -341,6 +362,9 @@ impl Processor {
     /// Enqueue a coroutine to be resumed as soon as possible (making it the head of the queue)
     pub fn ready(&mut self, coro: Handle) {
         self.queue_worker.push(coro);
+
+        // Wake up the worker thread if it is parked
+        self.try_wake_up();
     }
 
     /// Suspends the current running coroutine, equivalent to `Scheduler::sched`
@@ -366,12 +390,6 @@ impl Processor {
         self.main_coro.set_state(State::Suspended);
         target.set_state(State::ForceUnwinding);
         self.main_coro.raw_yield_to(target);
-    }
-
-    #[doc(hiddle)]
-    pub unsafe fn coroutine_finish(&mut self, coro: &mut Coroutine) {
-        let main_coro: *mut Coroutine = &mut *self.main_coro;
-        coro.yield_to(State::Finished, &mut *main_coro);
     }
 }
 
