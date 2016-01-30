@@ -34,7 +34,7 @@ use scheduler::Scheduler;
 
 #[derive(Clone)]
 pub struct Sender<T> {
-    inner: mpsc::Sender<T>,
+    inner: Option<mpsc::Sender<T>>,
 
     wait_list: Arc<Mutex<VecDeque<Handle>>>,
 }
@@ -43,7 +43,7 @@ unsafe impl<T: Send> Send for Sender<T> {}
 
 impl<T> Sender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        match self.inner.send(t) {
+        match self.inner.as_ref().unwrap().send(t) {
             Ok(..) => {
                 let mut wait_list = self.wait_list.lock().unwrap();
                 if let Some(coro) = wait_list.pop_front() {
@@ -58,6 +58,11 @@ impl<T> Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
+        // Drop the inner Sender first
+        {
+            self.inner.take();
+        }
+
         // Try to wake up all the pending coroutines if this is the last Sender.
         // Because if this is the last Sender, there won't be another one to push
         // items into this queue, so we have to wake the coroutine up explicitly,
@@ -130,7 +135,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let wait_list = Arc::new(Mutex::new(VecDeque::new()));
 
     let sender = Sender {
-        inner: tx,
+        inner: Some(tx),
         wait_list: wait_list.clone(),
     };
 
@@ -144,7 +149,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 
 #[derive(Clone)]
 pub struct SyncSender<T> {
-    inner: mpsc::SyncSender<T>,
+    inner: Option<mpsc::SyncSender<T>>,
 
     send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
     recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
@@ -154,7 +159,7 @@ unsafe impl<T: Send> Send for SyncSender<T> {}
 
 impl<T> SyncSender<T> {
     pub fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
-        match self.inner.try_send(t) {
+        match self.inner.as_ref().unwrap().try_send(t) {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                 if let Some(coro) = recv_wait_list.pop_front() {
@@ -195,7 +200,7 @@ impl<T> SyncSender<T> {
                 }
             }
         } else {
-            match self.inner.send(t) {
+            match self.inner.as_ref().unwrap().send(t) {
                 Ok(..) => {
                     let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                     if let Some(coro) = recv_wait_list.pop_front() {
@@ -211,6 +216,11 @@ impl<T> SyncSender<T> {
 
 impl<T> Drop for SyncSender<T> {
     fn drop(&mut self) {
+        // Drop the inner SyncSender first
+        {
+            self.inner.take();
+        }
+
         // Try to wake up all the pending coroutines if this is the last SyncSender.
         // Because if this is the last SyncSender, there won't be another one to push
         // items into this queue, so we have to wake the coroutine up explicitly,
@@ -225,7 +235,7 @@ impl<T> Drop for SyncSender<T> {
 }
 
 pub struct SyncReceiver<T> {
-    inner: mpsc::Receiver<T>,
+    inner: Option<mpsc::Receiver<T>>,
 
     send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
     recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
@@ -235,7 +245,7 @@ unsafe impl<T: Send> Send for SyncReceiver<T> {}
 
 impl<T> SyncReceiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        match self.inner.try_recv() {
+        match self.inner.as_ref().unwrap().try_recv() {
             Ok(t) => {
                 let mut send_wait_list = self.send_wait_list.lock().unwrap();
                 if let Some(coro) = send_wait_list.pop_front() {
@@ -275,7 +285,7 @@ impl<T> SyncReceiver<T> {
                 });
             }
         } else {
-            match self.inner.recv() {
+            match self.inner.as_ref().unwrap().recv() {
                 Ok(t) => {
                     let mut send_wait_list = self.send_wait_list.lock().unwrap();
                     if let Some(coro) = send_wait_list.pop_front() {
@@ -291,6 +301,11 @@ impl<T> SyncReceiver<T> {
 
 impl<T> Drop for SyncReceiver<T> {
     fn drop(&mut self) {
+        // Drop the inner SyncReceiver first
+        {
+            self.inner.take();
+        }
+
         // Try to wake up all the pending coroutines if this is the last SyncReceiver.
         // Because there won't be another one to push items into this queue, so we
         // have to wake the coroutine up explicitly, who ownes the other end of this channel.
@@ -308,13 +323,13 @@ pub fn sync_channel<T>(bound: usize) -> (SyncSender<T>, SyncReceiver<T>) {
     let recv_wait_list = Arc::new(Mutex::new(VecDeque::new()));
 
     let sender = SyncSender {
-        inner: tx,
+        inner: Some(tx),
         send_wait_list: send_wait_list.clone(),
         recv_wait_list: recv_wait_list.clone(),
     };
 
     let receiver = SyncReceiver {
-        inner: rx,
+        inner: Some(rx),
         send_wait_list: send_wait_list,
         recv_wait_list: recv_wait_list,
     };
