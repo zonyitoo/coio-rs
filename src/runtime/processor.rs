@@ -245,15 +245,12 @@ impl Processor {
                     match msg {
                         ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                         ProcMessage::Shutdown => {
-                            resume_all_tasks = true;
+                            break 'outerloop;
                         }
                         ProcMessage::Ready(mut coro) => {
                             coro.set_preferred_processor(Some(self.weak_self.clone()));
                             self.ready(coro);
                             resume_all_tasks = true;
-                        }
-                        ProcMessage::Exit => {
-                            break 'outerloop;
                         }
                     }
                 }
@@ -295,6 +292,15 @@ impl Processor {
                 if self.should_wake_up.swap(false, Ordering::SeqCst) {
                     break;
                 }
+            }
+        }
+
+        while let Ok(msg) = self.chan_receiver.try_recv() {
+            match msg {
+                ProcMessage::Ready(coro) => {
+                    drop(coro);
+                }
+                _ => {}
             }
         }
 
@@ -416,9 +422,6 @@ pub enum ProcMessage {
 
     /// Ask the processor to shutdown, which will going to force unwind all pending coroutines.
     Shutdown,
-
-    /// Exit the processor immediately.
-    Exit,
 }
 
 #[cfg(test)]
