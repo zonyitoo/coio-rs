@@ -22,6 +22,9 @@
 use std::boxed::FnBox;
 use std::cell::UnsafeCell;
 use std::ptr;
+use std::panic;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use libc;
 
@@ -65,6 +68,7 @@ pub struct Coroutine {
     runnable: Option<Box<FnBox()>>,
     name: Option<String>,
     final_yield_to: *mut Coroutine,
+    global_work_count: Option<Arc<AtomicUsize>>,
 }
 
 unsafe impl Send for Coroutine {}
@@ -79,6 +83,7 @@ impl Coroutine {
             runnable: runnable,
             name: None,
             final_yield_to: ptr::null_mut(),
+            global_work_count: None,
         })
     }
 
@@ -96,12 +101,19 @@ impl Coroutine {
             runnable: None,
             name: None,
             final_yield_to: ptr::null_mut(),
+            global_work_count: None,
         }
     }
 
     #[inline]
     pub fn set_name(&mut self, name: String) {
         self.name = Some(name);
+    }
+
+    #[inline]
+    pub fn attach(&mut self, gwc: Arc<AtomicUsize>) {
+        gwc.fetch_add(1, Ordering::SeqCst);
+        self.global_work_count = Some(gwc);
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -133,7 +145,7 @@ impl Coroutine {
         Context::swap(&mut self.context, &target.context);
 
         if let State::ForceUnwinding = self.state() {
-            panic!(ForceUnwind);
+            panic::propagate(Box::new(ForceUnwind));
         }
     }
 
@@ -204,6 +216,10 @@ impl Drop for Coroutine {
                     }
                 }
             }
+        }
+
+        if let Some(gwc) = self.global_work_count.as_ref() {
+            gwc.fetch_sub(1, Ordering::SeqCst);
         }
 
         match self.stack.take() {
