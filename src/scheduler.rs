@@ -336,10 +336,10 @@ impl Scheduler {
 
     /// Block the current coroutine
     #[inline]
-    pub fn take_current_coroutine<U, F>(f: F) -> U
+    pub fn block_with<U, F>(f: F) -> U
         where F: FnOnce(&mut Processor, Handle) -> U
     {
-        Processor::current().unwrap().take_current_coroutine(f)
+        Processor::current().unwrap().block_with(f)
     }
 }
 
@@ -356,7 +356,7 @@ impl Scheduler {
                                           -> io::Result<()> {
         let mut ret = Ok(());
 
-        Scheduler::take_current_coroutine(|_, coro| {
+        Scheduler::block_with(|_, coro| {
             let proc_hdl1 = Processor::current().unwrap().handle();
             let proc_hdl2 = proc_hdl1.clone();
             let channel = self.event_loop.channel();
@@ -413,7 +413,7 @@ impl Scheduler {
     pub fn sleep_ms(&self, delay: u64) -> io::Result<()> {
         let mut ret = Ok(());
 
-        Scheduler::take_current_coroutine(|_, coro| {
+        Scheduler::block_with(|_, coro| {
             let proc_hdl = Processor::current().unwrap().handle();
             let channel = self.event_loop.channel();
 

@@ -78,7 +78,7 @@ pub struct ProcessorInner {
     // Stores the context of the Processor::schedule() loop.
     main_coro: Handle,
 
-    // NOTE: ONLY to be used by resume() and take_current_coroutine().
+    // NOTE: ONLY to be used by resume() and block_with().
     current_coro: Option<Handle>,
 
     rng: rand::XorShiftRng,
@@ -172,7 +172,7 @@ impl Processor {
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
     /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
-    pub fn take_current_coroutine<U, F>(&mut self, f: F) -> U
+    pub fn block_with<U, F>(&mut self, f: F) -> U
         where F: FnOnce(&mut Self, Handle) -> U
     {
         debug_assert!(self.current_coro.is_some(), "No coroutine is running yet");
