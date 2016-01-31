@@ -58,7 +58,7 @@ impl<T> Mutex<T> {
         // 1. Try to lock with the atomic boolean
         while self.lock.compare_and_swap(false, true, Ordering::SeqCst) != false {
             // 2. Otherwise yield
-            Scheduler::take_current_coroutine(|coro| {
+            Scheduler::take_current_coroutine(|_, coro| {
                 // 3. Get the lock of wait list
                 let mut wait_list = self.wait_list.lock().unwrap();
 

@@ -85,7 +85,7 @@ pub struct ProcessorInner {
     queue_worker: Worker<Handle>,
     queue_stealer: Stealer<Handle>,
     neighbor_stealers: Vec<Stealer<Handle>>, // TODO: make it a Arc<Vec<>>
-    take_coro_cb: Option<&'static mut FnMut(Handle)>,
+    take_coro_cb: Option<&'static mut FnMut(&mut Processor, Handle)>,
 
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
@@ -161,10 +161,6 @@ impl Processor {
         unsafe { &*self.scheduler }
     }
 
-    pub unsafe fn mut_ptr(&self) -> *mut Processor {
-        mem::transmute(self)
-    }
-
     /// Get the thread local processor.
     pub fn current<'a>() -> Option<&'a mut Processor> {
         PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
@@ -177,7 +173,7 @@ impl Processor {
     /// Obtains the currently running coroutine after setting it's state to Blocked.
     /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
     pub fn take_current_coroutine<U, F>(&mut self, f: F) -> U
-        where F: FnOnce(Handle) -> U
+        where F: FnOnce(&mut Self, Handle) -> U
     {
         debug_assert!(self.current_coro.is_some(), "No coroutine is running yet");
 
@@ -185,12 +181,12 @@ impl Processor {
         let mut r = None;
 
         {
-            let mut cb = |coro: Handle| r = Some(f.take().unwrap()(coro));
+            let mut cb = |p: &mut Self, coro: Handle| r = Some(f.take().unwrap()(p, coro));
 
             // NOTE: Circumvents the following problem:
             //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
             //   &'static mut core::ops::FnMut(Box<coroutine::Coroutine>) + 'static (could be 128 bits) [E0512]
-            let cb_ref: &mut FnMut(Handle) = &mut cb;
+            let cb_ref: &mut FnMut(&mut Self, Handle) = &mut cb;
             let cb_ref_static = unsafe { mem::transmute(cb_ref) };
 
             // Gets executed as soon as yield_with() returns in Processor::resume().
@@ -304,7 +300,7 @@ impl Processor {
                 self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
             }
             State::Blocked => {
-                self.take_coro_cb.take().unwrap()(coro);
+                self.take_coro_cb.take().unwrap()(self, coro);
             }
             State::Finished => {}
             s => {

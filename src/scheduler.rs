@@ -279,7 +279,8 @@ impl Scheduler {
             };
 
             let f: Box<FnBox()> = Box::new(wrapper);
-            let main_coro = Coroutine::spawn_opts(unsafe { mem::transmute(f) }, Default::default());
+            let main_coro = Coroutine::spawn_opts(unsafe { mem::transmute(f) },
+                                                  Options::new().name("<main>".to_owned()));
             machines[0].processor_handle.send(ProcMessage::Ready(main_coro)).unwrap();
 
             match rx.try_recv() {
@@ -336,7 +337,7 @@ impl Scheduler {
     /// Block the current coroutine
     #[inline]
     pub fn take_current_coroutine<U, F>(f: F) -> U
-        where F: FnOnce(Handle) -> U
+        where F: FnOnce(&mut Processor, Handle) -> U
     {
         Processor::current().unwrap().take_current_coroutine(f)
     }
@@ -355,7 +356,7 @@ impl Scheduler {
                                           -> io::Result<()> {
         let mut ret = Ok(());
 
-        Scheduler::take_current_coroutine(|coro| {
+        Scheduler::take_current_coroutine(|_, coro| {
             let proc_hdl1 = Processor::current().unwrap().handle();
             let proc_hdl2 = proc_hdl1.clone();
             let channel = self.event_loop.channel();
@@ -412,7 +413,7 @@ impl Scheduler {
     pub fn sleep_ms(&self, delay: u64) -> io::Result<()> {
         let mut ret = Ok(());
 
-        Scheduler::take_current_coroutine(|coro| {
+        Scheduler::take_current_coroutine(|_, coro| {
             let proc_hdl = Processor::current().unwrap().handle();
             let channel = self.event_loop.channel();
 

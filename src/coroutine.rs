@@ -247,7 +247,7 @@ mod test {
                         }
 
                         let test = Test(shared_usize);
-                        Scheduler::take_current_coroutine(|_| {});
+                        Scheduler::take_current_coroutine(|_, _| {});
                         test.0.store(2, Ordering::SeqCst);
                     });
 
