@@ -494,27 +494,35 @@ mod test {
     #[test]
     fn test_channel_passing_ring() {
         Scheduler::new().with_workers(10).run(|| {
-            let (tx, mut rx) = channel();
+            let mut handlers = Vec::new();
+            {
+                let (tx, mut rx) = channel();
 
-            for _ in 0..10000 {
-                let (ltx, lrx) = channel();
-                Scheduler::spawn(move|| {
-                    loop {
-                        let value = match rx.recv() {
-                            Ok(v) => v,
-                            Err(..) => break,
-                        };
-                        ltx.send(value).unwrap();
-                    }
-                });
+                for _ in 0..10000 {
+                    let (ltx, lrx) = channel();
+                    let h = Scheduler::spawn(move|| {
+                        loop {
+                            let value = match rx.recv() {
+                                Ok(v) => v,
+                                Err(..) => break,
+                            };
+                            ltx.send(value).unwrap();
+                        }
+                    });
+                    handlers.push(h);
 
-                rx = lrx;
+                    rx = lrx;
+                }
+
+                for i in 0..100 {
+                    tx.send(i).unwrap();
+                    let value = rx.recv().unwrap();
+                    assert_eq!(i, value);
+                }
             }
 
-            for i in 0..100 {
-                tx.send(i).unwrap();
-                let value = rx.recv().unwrap();
-                assert_eq!(i, value);
+            for h in handlers {
+                h.join().unwrap();
             }
         }).unwrap();
     }
@@ -522,28 +530,38 @@ mod test {
     #[test]
     fn test_sync_channel_passing_ring() {
         Scheduler::new().with_workers(10).run(|| {
-            let (tx, mut rx) = sync_channel(1);
+            let mut handlers = Vec::new();
 
-            for _ in 0..1000 {
-                let (ltx, lrx) = sync_channel(1);
-                Scheduler::spawn(move|| {
-                    loop {
-                        let value = match rx.recv() {
-                            Ok(v) => v,
-                            Err(..) => break,
-                        };
-                        ltx.send(value).unwrap();
-                    }
-                });
+            {
+                let (tx, mut rx) = sync_channel(1);
 
-                rx = lrx;
+                for _ in 0..1000 {
+                    let (ltx, lrx) = sync_channel(1);
+                    let h = Scheduler::spawn(move|| {
+                        loop {
+                            let value = match rx.recv() {
+                                Ok(v) => v,
+                                Err(..) => break,
+                            };
+                            ltx.send(value).unwrap();
+                        }
+                    });
+                    handlers.push(h);
+
+                    rx = lrx;
+                }
+
+                for i in 0..10 {
+                    tx.send(i).unwrap();
+                    let value = rx.recv().unwrap();
+                    assert_eq!(i, value);
+                }
             }
 
-            for i in 0..10 {
-                tx.send(i).unwrap();
-                let value = rx.recv().unwrap();
-                assert_eq!(i, value);
+            for h in handlers {
+                h.join().unwrap();
             }
+
         }).unwrap();
     }
 }
