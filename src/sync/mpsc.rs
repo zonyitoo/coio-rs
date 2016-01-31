@@ -70,6 +70,8 @@ impl<T> Drop for Sender<T> {
         if Arc::strong_count(&self.wait_list) <= 2 {
             let mut wait_list = self.wait_list.lock().unwrap();
             for hdl in wait_list.drain(..) {
+                trace!("Coroutine `{}` is awaken by dropping Sender in wait_list",
+                       hdl.debug_name());
                 Scheduler::ready(hdl);
             }
         }
@@ -167,6 +169,9 @@ impl<T> SyncSender<T> {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                 if let Some(coro) = recv_wait_list.pop_front() {
+                    trace!("Coroutine `{}` is waken up in SyncSender receive_wait_list, {} remains",
+                           coro.debug_name(),
+                           recv_wait_list.len());
                     Scheduler::ready(coro);
                 }
                 Ok(())
@@ -239,6 +244,8 @@ impl<T> Drop for SyncSender<T> {
         if Arc::strong_count(&self.recv_wait_list) <= 2 {
             let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
             for hdl in recv_wait_list.drain(..) {
+                trace!("Coroutine `{}` is awaken by dropping SyncSender in recv_wait_list",
+                       hdl.debug_name());
                 Scheduler::ready(hdl);
             }
         }
@@ -260,6 +267,9 @@ impl<T> SyncReceiver<T> {
             Ok(t) => {
                 let mut send_wait_list = self.send_wait_list.lock().unwrap();
                 if let Some(coro) = send_wait_list.pop_front() {
+                    trace!("Coroutine `{}` is waken up in SyncReceiver send_wait_list, {} remains",
+                           coro.debug_name(),
+                           send_wait_list.len());
                     Scheduler::ready(coro);
                 }
                 Ok(t)
@@ -326,6 +336,8 @@ impl<T> Drop for SyncReceiver<T> {
         // have to wake the coroutine up explicitly, who ownes the other end of this channel.
         let mut send_wait_list = self.send_wait_list.lock().unwrap();
         for hdl in send_wait_list.drain(..) {
+            trace!("Coroutine `{}` is awaken by dropping SyncReceiver in send_wait_list",
+                   hdl.debug_name());
             Scheduler::ready(hdl);
         }
     }

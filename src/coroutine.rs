@@ -82,11 +82,12 @@ impl Coroutine {
         })
     }
 
+    #[allow(unused)]
     pub unsafe fn empty() -> Handle {
         Coroutine::new(Context::empty(), None, None)
     }
 
-    unsafe fn empty_on_stack() -> Coroutine {
+    pub unsafe fn empty_on_stack() -> Coroutine {
         Coroutine {
             context: Context::empty(),
             stack: None,
@@ -96,6 +97,11 @@ impl Coroutine {
             name: None,
             final_yield_to: ptr::null_mut(),
         }
+    }
+
+    #[inline]
+    pub fn set_name(&mut self, name: String) {
+        self.name = Some(name);
     }
 
     pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
@@ -166,11 +172,16 @@ impl Coroutine {
     pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
         self.name().unwrap_or(default)
     }
+
+    #[inline]
+    pub fn debug_name(&self) -> &str {
+        self.name_or("<unnamed>")
+    }
 }
 
 impl Drop for Coroutine {
     fn drop(&mut self) {
-        trace!("Dropping Coroutine `{}` with state: {:?}", self.name_or("<unnamed>"), self.state());
+        trace!("Dropping Coroutine `{}` with state: {:?}", self.debug_name(), self.state());
 
         unsafe {
             match self.state() {
@@ -179,14 +190,17 @@ impl Drop for Coroutine {
                     // Unwind the stack only if it actually has a stack!
                     if self.stack.is_some() {
                         if let Some(p) = Processor::current() {
-                            trace!("Coroutine `{}` is force-unwinding with processors", self.name_or("<unnamed>"));
+                            trace!("Coroutine `{}` is force-unwinding with processors", self.debug_name());
                             p.toggle_unwinding(self);
                         } else {
                             // This would happen if all the processors are gone just before
                             // the container that holding the Handle of this coroutine is dropping
-                            trace!("Coroutine `{}` is force-unwinding without processors", self.name_or("<unnamed>"));
+                            trace!("Coroutine `{}` is force-unwinding without processors", self.debug_name());
                             Coroutine::resume(State::ForceUnwinding, self);
                         }
+                    } else {
+                        trace!("Coroutine `{}` does not have a stack, so it doesn't need to do unwinding",
+                               self.debug_name());
                     }
                 }
             }

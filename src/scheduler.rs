@@ -199,23 +199,36 @@ impl Scheduler {
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     pub fn ready(mut coro: Handle) {
+        trace!("Coroutine `{}` is ready to run", coro.debug_name());
         let current = Processor::current();
 
         if let Some(mut preferred) = coro.preferred_processor() {
-            if Some(&mut preferred) == current {
-                // We're on the same thread ---> use the faster ready() method.
-                return preferred.ready(coro);
+            trace!("Coroutine `{}` has preferred {:?}", coro.debug_name(), preferred);
+
+            if let Some(ref curr) = current {
+                if preferred.id() == curr.id() {
+                    // We're on the same thread ---> use the faster ready() method.
+                    trace!("Coroutine `{}` preferred to run in the current thread, push it into local queue",
+                           coro.debug_name());
+                    return preferred.ready(coro);
+                }
             }
 
+            trace!("Push Coroutine `{}` into the message queue of {:?}",
+                   coro.debug_name(),
+                   preferred);
             let _ = preferred.handle().send(ProcMessage::Ready(coro));
             return;
         }
 
         if let Some(mut current) = current {
+            trace!("Coroutine `{}` does not have preferred processor, push it into local queue",
+                   coro.debug_name());
             return current.ready(coro);
         }
 
         // Resume it right here
+        trace!("Coroutine `{}` runs without processor", coro.debug_name());
         Coroutine::resume(State::Running, &mut *coro);
     }
 

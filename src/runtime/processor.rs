@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SendError};
 use std::thread::{self, Builder, Thread};
 use std::time::Duration;
+use std::fmt;
 
 use deque::{self, Worker, Stealer, Stolen};
 use rand;
@@ -70,13 +71,21 @@ pub struct Processor {
 unsafe impl Send for Processor {}
 unsafe impl Sync for Processor {}
 
+impl fmt::Debug for Processor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Processor(#{})", self.id())
+    }
+}
+
 /// Processing unit of a thread
 pub struct ProcessorInner {
+    id: usize,
+
     weak_self: WeakProcessor,
     scheduler: *mut Scheduler,
 
     // Stores the context of the Processor::schedule() loop.
-    main_coro: Handle,
+    main_coro: Coroutine,
 
     // NOTE: ONLY to be used by resume() and block_with().
     current_coro: Option<Handle>,
@@ -109,10 +118,16 @@ impl Processor {
 
         let mut p = Processor {
             inner: Arc::new(ProcessorInner {
+                id: processor_id,
+
                 weak_self: unsafe { mem::zeroed() },
                 scheduler: sched,
 
-                main_coro: unsafe { Coroutine::empty() },
+                main_coro: unsafe {
+                    let mut coro = Coroutine::empty_on_stack();
+                    coro.set_name(format!("<proc_#{}>", processor_id));
+                    coro
+                },
                 current_coro: None,
 
                 rng: rand::weak_rng(),
@@ -139,7 +154,7 @@ impl Processor {
         let stealer = p.stealer();
 
         let thread_handle = Builder::new()
-                                .name(format!("Processor #{}", processor_id))
+                                .name(format!("Processor#{}", processor_id))
                                 .spawn(move || {
                                     PROCESSOR.with(|proc_opt| unsafe {
                                         let proc_opt = &mut *proc_opt.get();
@@ -168,6 +183,10 @@ impl Processor {
 
     pub fn weak_self(&self) -> &WeakProcessor {
         &self.weak_self
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
@@ -255,6 +274,10 @@ impl Processor {
                     let idx = (rand_idx + idx) % total_stealers;
 
                     if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
+                        trace!("{:?} steals Coroutine `{}` from neighbor[{}]",
+                               self,
+                               hdl.debug_name(),
+                               idx);
                         self.resume(hdl);
                         continue 'outerloop;
                     }
@@ -285,6 +308,7 @@ impl Processor {
         debug_assert!(coro.state() != State::Finished,
                       "Cannot resume a finished coroutine");
 
+        trace!("Resuming Coroutine `{}` in {:?}", coro.debug_name(), self);
         unsafe {
             let current_coro: *mut Coroutine = &mut *coro;
 
@@ -294,6 +318,7 @@ impl Processor {
         }
 
         let coro = self.current_coro.take().unwrap();
+        trace!("Coroutine `{}` is yielded with state: {:?}", coro.debug_name(), coro.state());
 
         match coro.state() {
             State::Suspended => {
@@ -325,7 +350,7 @@ impl Processor {
     /// Yield the current running coroutine with specified result
     pub fn yield_with(&mut self, r: State) {
         unsafe {
-            let main_coro: *mut Coroutine = &mut *self.main_coro;
+            let main_coro: *mut Coroutine = &mut self.main_coro;
             self.current_coro.as_mut().unwrap().yield_to(r, &mut *main_coro);
         }
     }
