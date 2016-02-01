@@ -332,6 +332,11 @@ impl Scheduler {
 
         match main_coro_rx.recv() {
             Ok(main_ret) => {
+                // Check again to be sure
+                while self.work_count.load(Ordering::SeqCst) != 0 {
+                    event_loop.run_once(&mut io_handler, Some(100)).unwrap();
+                }
+
                 for m in machines.iter() {
                     m.processor_handle.send(ProcMessage::Shutdown).unwrap();
                 }
