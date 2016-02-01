@@ -238,30 +238,30 @@ impl Processor {
             }
 
             // 2. Check the mainbox
-            {
-                let mut resume_all_tasks = false;
+            loop {
+                {
+                    let mut resume_all_tasks = false;
 
-                while let Ok(msg) = self.chan_receiver.try_recv() {
-                    match msg {
-                        ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
-                        ProcMessage::Shutdown => {
-                            break 'outerloop;
+                    while let Ok(msg) = self.chan_receiver.try_recv() {
+                        match msg {
+                            ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
+                            ProcMessage::Shutdown => {
+                                break 'outerloop;
+                            }
+                            ProcMessage::Ready(mut coro) => {
+                                coro.set_preferred_processor(Some(self.weak_self.clone()));
+                                self.ready(coro);
+                                resume_all_tasks = true;
+                            }
                         }
-                        ProcMessage::Ready(mut coro) => {
-                            coro.set_preferred_processor(Some(self.weak_self.clone()));
-                            self.ready(coro);
-                            resume_all_tasks = true;
-                        }
+                    }
+
+                    // Prefer running own tasks before stealing --> "continue" from anew.
+                    if resume_all_tasks {
+                        continue 'outerloop;
                     }
                 }
 
-                // Prefer running own tasks before stealing --> "continue" from anew.
-                if resume_all_tasks {
-                    continue 'outerloop;
-                }
-            }
-
-            loop {
                 // 3. Randomly steal from neighbors as a last measure.
                 // TODO: To improve cache locality foreign lists should be split in half or so instead.
                 let rand_idx = self.rng.gen::<usize>();
@@ -285,7 +285,7 @@ impl Processor {
                     break;
                 }
 
-                thread::park_timeout(Duration::from_millis(100));
+                thread::park_timeout(Duration::from_millis(1));
 
                 // If we are waken up, then break this loop
                 // otherwise, continue to steal jobs from the others
