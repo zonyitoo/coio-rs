@@ -200,7 +200,9 @@ impl Processor {
         let mut r = None;
 
         {
-            let mut cb = |p: &mut Self, coro: Handle| r = Some(f.take().unwrap()(p, coro));
+            let mut cb = |p: &mut Self, coro: Handle| {
+                r = Some(f.take().expect("Impossible! Function becomes None?!")(p, coro))
+            };
 
             // NOTE: Circumvents the following problem:
             //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
@@ -213,7 +215,7 @@ impl Processor {
             self.yield_with(State::Blocked);
         }
 
-        r.unwrap()
+        r.expect("Couldn't get result from the block_with callback")
     }
 
     pub fn stealer(&self) -> Stealer<Handle> {
@@ -324,7 +326,9 @@ impl Processor {
         }
 
         let coro = self.current_coro.take().unwrap();
-        trace!("Coroutine `{}` is yielded with state: {:?}", coro.debug_name(), coro.state());
+        trace!("Coroutine `{}` is yielded with state: {:?}",
+               coro.debug_name(),
+               coro.state());
 
         match coro.state() {
             State::Suspended => {
