@@ -194,6 +194,11 @@ impl Scheduler {
         Processor::current().and_then(|p| unsafe { Some(mem::transmute(p.scheduler())) })
     }
 
+    #[inline]
+    pub fn work_count(&self) -> usize {
+        self.work_count.load(Ordering::SeqCst)
+    }
+
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     pub fn ready(mut coro: Handle) {
