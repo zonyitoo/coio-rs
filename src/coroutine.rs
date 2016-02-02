@@ -195,25 +195,23 @@ impl Drop for Coroutine {
     fn drop(&mut self) {
         trace!("Dropping Coroutine `{}` with state: {:?}", self.debug_name(), self.state());
 
-        unsafe {
-            match self.state() {
-                State::Initialized | State::Finished => {}
-                _ => {
-                    // Unwind the stack only if it actually has a stack!
-                    if self.stack.is_some() {
-                        if let Some(p) = Processor::current() {
-                            trace!("Coroutine `{}` is force-unwinding with processors", self.debug_name());
-                            p.toggle_unwinding(self);
-                        } else {
-                            // This would happen if all the processors are gone just before
-                            // the container that holding the Handle of this coroutine is dropping
-                            trace!("Coroutine `{}` is force-unwinding without processors", self.debug_name());
-                            Coroutine::resume(State::ForceUnwinding, self);
-                        }
+        match self.state() {
+            State::Initialized | State::Finished => {}
+            _ => {
+                // Unwind the stack only if it actually has a stack!
+                if self.stack.is_some() {
+                    if let Some(mut p) = Processor::current() {
+                        trace!("Coroutine `{}` is force-unwinding with processors", self.debug_name());
+                        p.begin_unwind(self);
                     } else {
-                        trace!("Coroutine `{}` does not have a stack, so it doesn't need to do unwinding",
-                               self.debug_name());
+                        // This would happen if all the processors are gone just before
+                        // the container that holding the Handle of this coroutine is dropping
+                        trace!("Coroutine `{}` is force-unwinding without processors", self.debug_name());
+                        Coroutine::resume(State::ForceUnwinding, self);
                     }
+                } else {
+                    trace!("Coroutine `{}` does not have a stack, so it doesn't need to do unwinding",
+                           self.debug_name());
                 }
             }
         }

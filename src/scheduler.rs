@@ -199,6 +199,12 @@ impl Scheduler {
         self.work_count.load(Ordering::SeqCst)
     }
 
+    #[inline]
+    #[doc(hidden)]
+    pub unsafe fn work_counter(&self) -> Arc<AtomicUsize> {
+        self.work_count.clone()
+    }
+
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     pub fn ready(mut coro: Handle) {
@@ -248,21 +254,6 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let processor = Processor::current().unwrap();
-        let (mut new_coro, rx) = Scheduler::create_coroutine_opts(f, opts);
-        new_coro.set_preferred_processor(Some(processor.weak_self().clone()));
-        new_coro.attach(processor.scheduler().work_count.clone());
-
-        processor.ready(new_coro);
-
-        JoinHandle { result: rx }
-    }
-
-    fn create_coroutine_opts<F, T>(f: F, opts: Options)
-            -> (Handle, Receiver<Result<T, Box<Any + Send>>>)
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
-    {
         let (tx, rx) = ::sync::mpsc::channel();
         let wrapper = move || {
             let ret = unsafe { ::try(move || f()) };
@@ -270,9 +261,10 @@ impl Scheduler {
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.send(ret);
         };
+        let mut processor = Processor::current().unwrap();
+        processor.spawn_opts(wrapper, opts);
 
-        let new_coro = Coroutine::spawn_opts(Box::new(wrapper), opts);
-        (new_coro, rx)
+        JoinHandle { result: rx }
     }
 
     /// Run the scheduler
@@ -367,7 +359,7 @@ impl Scheduler {
     /// Suspend the current coroutine
     #[inline]
     pub fn sched() {
-        Processor::current().unwrap().sched()
+        Processor::current().map(|x| x.sched());
     }
 
     /// Block the current coroutine
@@ -376,7 +368,7 @@ impl Scheduler {
         where F: FnOnce(&mut Processor, Handle) -> U + 'scope,
               U: 'scope
     {
-        Processor::current().unwrap().block_with(f)
+        Processor::current().map(|x| x.block_with(f)).unwrap()
     }
 }
 

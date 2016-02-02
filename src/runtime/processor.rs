@@ -37,6 +37,7 @@ use rand;
 
 use coroutine::{Coroutine, State, Handle};
 use scheduler::Scheduler;
+use options::Options;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
@@ -61,6 +62,85 @@ pub struct Machine {
     pub thread_handle: thread::JoinHandle<()>,
     pub processor_handle: ProcMessageSender,
     pub stealer: Stealer<Handle>,
+}
+
+/// Control handle for the Processor
+pub struct ProcessorHandle<'a>(&'a mut Processor);
+
+impl<'a> ProcessorHandle<'a> {
+    #[inline]
+    pub fn id(&self) -> usize {
+        self.0.id()
+    }
+
+    /// Obtains the currently running coroutine after setting it's state to Blocked.
+    /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
+    pub fn block_with<'scope, U, F>(self, f: F) -> U
+        where F: FnOnce(&mut Processor, Handle) -> U + 'scope,
+              U: 'scope
+    {
+        let processor = self.0;
+
+        debug_assert!(processor.current_coro.is_some(), "Coroutine is missing");
+
+        let mut f = Some(f);
+        let mut r = None;
+
+        {
+            let r = &mut r;
+            let mut cb = |p: &mut Processor, coro: Handle| {
+                *r = Some(f.take().unwrap()(p, coro));
+            };
+
+            // NOTE: Circumvents the following problem:
+            //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
+            //   &'static mut core::ops::FnMut(Box<coroutine::Coroutine>) + 'static (could be 128 bits) [E0512]
+            let cb_ref = &mut cb as &mut FnMut(&mut Processor, Handle);
+            let cb_ref_static: TakeCoroutineCallback<'static> = unsafe { mem::transmute(cb_ref) };
+
+            // Gets executed as soon as yield_with() returns in Processor::resume().
+            processor.take_coro_cb = Some(cb_ref_static);
+            processor.yield_with(State::Blocked);
+        }
+
+        r.expect("Couldn't get result from the block_with callback")
+    }
+
+    /// Yield the current coroutine
+    #[inline]
+    pub fn sched(self) {
+        self.0.sched()
+    }
+
+    #[inline]
+    pub fn handle(&self) -> ProcMessageSender {
+        self.0.handle()
+    }
+
+    #[inline]
+    pub fn scheduler(&self) -> &Scheduler {
+        self.0.scheduler()
+    }
+
+    #[inline]
+    pub fn ready(&mut self, coroutine: Handle) {
+        self.0.ready(coroutine)
+    }
+
+    #[inline]
+    pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
+        where F: FnOnce() + Send + 'static
+    {
+        let mut new_coro = Coroutine::spawn_opts(Box::new(f), opts);
+        new_coro.set_preferred_processor(Some(self.0.weak_self().clone()));
+        new_coro.attach(unsafe { self.0.scheduler().work_counter() });
+        self.ready(new_coro);
+    }
+
+    #[inline]
+    pub fn begin_unwind(&mut self, raw_coro: &mut Coroutine) {
+        unsafe { self.0.toggle_unwinding(raw_coro) }
+    }
 }
 
 #[derive(Clone)]
@@ -179,7 +259,11 @@ impl Processor {
     }
 
     /// Get the thread local processor.
-    pub fn current<'a>() -> Option<&'a mut Processor> {
+    pub fn current<'a>() -> Option<ProcessorHandle<'a>> {
+        Processor::instance().map(ProcessorHandle)
+    }
+
+    fn instance<'a>() -> Option<&'a mut Processor> {
         PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
     }
 
@@ -189,37 +273,6 @@ impl Processor {
 
     pub fn id(&self) -> usize {
         self.id
-    }
-
-    /// Obtains the currently running coroutine after setting it's state to Blocked.
-    /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
-    pub fn block_with<'scope, U, F>(&mut self, f: F) -> U
-        where F: FnOnce(&mut Self, Handle) -> U + 'scope,
-              U: 'scope
-    {
-        debug_assert!(self.current_coro.is_some(), "No coroutine is running yet");
-
-        let mut f = Some(f);
-        let mut r = None;
-
-        {
-            let r = &mut r;
-            let mut cb = |p: &mut Self, coro: Handle| {
-                *r = Some(f.take().unwrap()(p, coro));
-            };
-
-            // NOTE: Circumvents the following problem:
-            //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
-            //   &'static mut core::ops::FnMut(Box<coroutine::Coroutine>) + 'static (could be 128 bits) [E0512]
-            let cb_ref = &mut cb as &mut FnMut(&mut Processor, Handle);
-            let cb_ref_static: TakeCoroutineCallback<'static> = unsafe { mem::transmute(cb_ref) };
-
-            // Gets executed as soon as yield_with() returns in Processor::resume().
-            self.take_coro_cb = Some(cb_ref_static);
-            self.yield_with(State::Blocked);
-        }
-
-        r.expect("Couldn't get result from the block_with callback")
     }
 
     pub fn stealer(&self) -> Stealer<Handle> {

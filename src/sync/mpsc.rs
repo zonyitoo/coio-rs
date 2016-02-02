@@ -92,7 +92,7 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        while let Some(mut processor) = Processor::current() {
+        while let Some(processor) = Processor::current() {
             // 1. Try to receive first
             let mut r = self.try_recv();
             match r {
@@ -181,41 +181,42 @@ impl<T> SyncSender<T> {
     }
 
     pub fn send(&self, mut t: T) -> Result<(), SendError<T>> {
-        while let Some(mut processor) = Processor::current() {
+        while let Some(p) = Processor::current() {
             let mut r = self.try_send(t);
 
             match r {
                 Ok(..) => return Ok(()),
                 Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                Err(TrySendError::Full(t)) => {
-                    r = processor.block_with(move |p, coro| {
-                        let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                        let r = self.try_send(t);
-
-                        match r {
-                            Err(TrySendError::Full(..)) => {
-                                send_wait_list.push_back(coro);
-                            }
-                            _ => {
-                                p.ready(coro);
-                            }
-                        }
-
-                        r
-                    });
+                Err(TrySendError::Full(t_)) => {
+                    t = t_;
                 }
             }
+
+            r = p.block_with(move|p, coro| {
+                let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                let r = self.try_send(t);
+
+                match r {
+                    Err(TrySendError::Full(..)) => {
+                        send_wait_list.push_back(coro);
+                    }
+                    _ => {
+                        p.ready(coro);
+                    }
+                }
+
+                r
+            });
 
             match r {
                 Ok(..) => return Ok(()),
                 Err(TrySendError::Disconnected(e)) => return Err(SendError(e)),
-                Err(TrySendError::Full(t_bak)) => {
-                    t = t_bak; // Restore t
+                Err(TrySendError::Full(t_)) => {
+                    t = t_;
                 }
             }
         }
 
-        // What? The processor is gone? Then use blocking send
         match self.inner.as_ref().unwrap().send(t) {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
@@ -279,7 +280,7 @@ impl<T> SyncReceiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        while let Some(mut processor) = Processor::current() {
+        while let Some(processor) = Processor::current() {
             let mut r = self.try_recv();
 
             match r {
