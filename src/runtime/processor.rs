@@ -77,6 +77,8 @@ impl fmt::Debug for Processor {
     }
 }
 
+type TakeCoroutineCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
+
 /// Processing unit of a thread
 pub struct ProcessorInner {
     id: usize,
@@ -94,7 +96,7 @@ pub struct ProcessorInner {
     queue_worker: Worker<Handle>,
     queue_stealer: Stealer<Handle>,
     neighbor_stealers: Vec<Stealer<Handle>>, // TODO: make it a Arc<Vec<>>
-    take_coro_cb: Option<&'static mut FnMut(&mut Processor, Handle)>,
+    take_coro_cb: Option<TakeCoroutineCallback<'static>>,
 
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
@@ -191,8 +193,9 @@ impl Processor {
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
     /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
-    pub fn block_with<U, F>(&mut self, f: F) -> U
-        where F: FnOnce(&mut Self, Handle) -> U
+    pub fn block_with<'scope, U, F>(&mut self, f: F) -> U
+        where F: FnOnce(&mut Self, Handle) -> U + 'scope,
+              U: 'scope
     {
         debug_assert!(self.current_coro.is_some(), "No coroutine is running yet");
 
@@ -200,15 +203,16 @@ impl Processor {
         let mut r = None;
 
         {
+            let r = &mut r;
             let mut cb = |p: &mut Self, coro: Handle| {
-                r = Some(f.take().expect("Impossible! Function becomes None?!")(p, coro))
+                *r = Some(f.take().unwrap()(p, coro));
             };
 
             // NOTE: Circumvents the following problem:
             //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
             //   &'static mut core::ops::FnMut(Box<coroutine::Coroutine>) + 'static (could be 128 bits) [E0512]
-            let cb_ref: &mut FnMut(&mut Self, Handle) = &mut cb;
-            let cb_ref_static = unsafe { mem::transmute(cb_ref) };
+            let cb_ref = &mut cb as &mut FnMut(&mut Processor, Handle);
+            let cb_ref_static: TakeCoroutineCallback<'static> = unsafe { mem::transmute(cb_ref) };
 
             // Gets executed as soon as yield_with() returns in Processor::resume().
             self.take_coro_cb = Some(cb_ref_static);

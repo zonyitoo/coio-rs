@@ -342,6 +342,8 @@ impl Scheduler {
                     event_loop.run_once(&mut io_handler, Some(100)).unwrap();
                 }
 
+                trace!("Scheduler is going to shutdown, asking all the threads to shutdown");
+
                 for m in machines.iter() {
                     m.processor_handle.send(ProcMessage::Shutdown).unwrap();
                 }
@@ -351,6 +353,8 @@ impl Scheduler {
                 for m in machines.drain(..) {
                     let _ = m.thread_handle.join();
                 }
+
+                trace!("Bye bye!");
 
                 return main_ret;
             }
@@ -368,8 +372,9 @@ impl Scheduler {
 
     /// Block the current coroutine
     #[inline]
-    pub fn block_with<U, F>(f: F) -> U
-        where F: FnOnce(&mut Processor, Handle) -> U
+    pub fn block_with<'scope, U, F>(f: F) -> U
+        where F: FnOnce(&mut Processor, Handle) -> U + 'scope,
+              U: 'scope
     {
         Processor::current().unwrap().block_with(f)
     }
