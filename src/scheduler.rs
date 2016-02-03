@@ -30,6 +30,7 @@ use std::sync::mpsc::{TryRecvError, RecvError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt, Sender};
 use mio::util::Slab;
@@ -356,10 +357,13 @@ impl Scheduler {
         }
     }
 
-    /// Suspend the current coroutine
+    /// Suspend the current coroutine or thread
     #[inline]
     pub fn sched() {
-        Processor::current().map(|x| x.sched());
+        match Processor::current() {
+            Some(p) => p.sched(),
+            None => thread::yield_now(),
+        }
     }
 
     /// Block the current coroutine

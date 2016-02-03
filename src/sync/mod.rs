@@ -26,3 +26,4 @@ pub use self::mutex::Mutex;
 
 pub mod mutex;
 pub mod mpsc;
+pub mod mono_barrier;
