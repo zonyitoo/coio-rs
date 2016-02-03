@@ -45,6 +45,7 @@ pub mod sync;
 pub mod scheduler;
 pub mod options;
 pub mod promise;
+pub mod join_handle;
 mod runtime;
 mod coroutine;
 

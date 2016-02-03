@@ -31,6 +31,8 @@ pub enum LockError {
 const EMPTY: usize = 0;
 const PROCESSING: usize = 1;
 const OCCUPIED: usize = 2;
+const FAST_PROCESSING: usize = 3;
+const FAST_PROCESSED: usize = 4;
 
 impl MonoBarrier {
     /// Create a new `MonoBarrier`
@@ -64,9 +66,14 @@ impl MonoBarrier {
                         return Ok(());
                     }
                     // Someone is modifying on this barrier, check it again later
-                    PROCESSING => p.sched(),
+                    PROCESSING | FAST_PROCESSING => p.sched(),
                     // The barrier is occupied by other, return Err
                     OCCUPIED => return Err(LockError::Occupied),
+                    // Fast process finished, return immediately
+                    FAST_PROCESSED => {
+                        self.lock.store(EMPTY, Ordering::SeqCst);
+                        return Ok(());
+                    }
                     _ => unreachable!(),
                 }
             } else {
@@ -90,6 +97,10 @@ impl MonoBarrier {
                     }
                     PROCESSING => thread::yield_now(),
                     OCCUPIED => return Err(LockError::Occupied),
+                    FAST_PROCESSED => {
+                        self.lock.store(EMPTY, Ordering::SeqCst);
+                        return Ok(());
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -101,7 +112,7 @@ impl MonoBarrier {
         loop {
             match self.lock.compare_and_swap(OCCUPIED, PROCESSING, Ordering::SeqCst) {
                 // No one is waiting on this barrier
-                EMPTY => {
+                EMPTY | FAST_PROCESSED => {
                     // Ensure there must be someone waiting on this
                     if self.detached.load(Ordering::SeqCst) {
                         return;
@@ -109,9 +120,55 @@ impl MonoBarrier {
                     Scheduler::sched();
                 }
                 // Someone is modifying the barrier, check it again later
-                PROCESSING => Scheduler::sched(),
+                PROCESSING | FAST_PROCESSING => Scheduler::sched(),
                 // Someone is waiting on this barrier, wake him up
                 OCCUPIED => {
+                    let waiter = unsafe { &mut *self.waiter.get() };
+                    match waiter.take().expect("Impossible! Nothing is waiting!") {
+                        Executor::Coroutine(coro) => {
+                            Scheduler::ready(coro);
+                        }
+                        Executor::Thread(locker) => {
+                            let &(ref mutex, ref condvar) = &*locker;
+                            let mut guard = mutex.lock().unwrap();
+                            *guard = true;
+                            condvar.notify_one();
+                        }
+                    }
+                    return;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    pub fn signal_then<F>(&self, f: F)
+        where F: FnOnce()
+    {
+        loop {
+            match self.lock.compare_and_swap(OCCUPIED, PROCESSING, Ordering::SeqCst) {
+                // No one is waiting on this barrier
+                EMPTY => {
+                    if self.lock.compare_and_swap(EMPTY, FAST_PROCESSING, Ordering::SeqCst) == EMPTY {
+                        f();
+                        self.lock.store(FAST_PROCESSED, Ordering::SeqCst);
+                        return;
+                    }
+
+                    // Ensure there must be someone waiting on this
+                    if self.detached.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    Scheduler::sched();
+                }
+                // Read before you set it again
+                FAST_PROCESSED => panic!("Read before you set the barrier again"),
+                // Someone is modifying the barrier, check it again later
+                PROCESSING | FAST_PROCESSING => Scheduler::sched(),
+                // Someone is waiting on this barrier, wake him up
+                OCCUPIED => {
+                    f();
+
                     let waiter = unsafe { &mut *self.waiter.get() };
                     match waiter.take().expect("Impossible! Nothing is waiting!") {
                         Executor::Coroutine(coro) => {
@@ -227,6 +284,30 @@ mod test {
                 }
 
                 assert_eq!(protected_data.load(Ordering::SeqCst), 0);
+                barrier.wait().unwrap();
+                assert_eq!(protected_data.load(Ordering::SeqCst), 1);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_mono_barrier_signal_then() {
+        Scheduler::new()
+            .run(|| {
+                let barrier = Arc::new(MonoBarrier::new());
+                let protected_data = Arc::new(AtomicUsize::new(0));
+
+                let handle = {
+                    let barrier = barrier.clone();
+                    let protected_data = protected_data.clone();
+                    thread::spawn(move|| {
+                        barrier.signal_then(move|| {
+                            protected_data.fetch_add(1, Ordering::SeqCst);
+                        });
+                    })
+                };
+
+                handle.join().unwrap();
                 barrier.wait().unwrap();
                 assert_eq!(protected_data.load(Ordering::SeqCst), 1);
             })
