@@ -87,9 +87,8 @@ impl<'a> ProcessorHandle<'a> {
         let mut r = None;
 
         {
-            let r = &mut r;
             let mut cb = |p: &mut Processor, coro: Handle| {
-                *r = Some(f.take().unwrap()(p, coro));
+                r = Some(f.take().unwrap()(p, coro));
             };
 
             // NOTE: Circumvents the following problem:

@@ -10,7 +10,7 @@ struct JoinHandleInner<T> {
 }
 
 unsafe impl<T: Send> Send for JoinHandleInner<T> {}
-unsafe impl<T: Sync> Sync for JoinHandleInner<T> {}
+unsafe impl<T> Sync for JoinHandleInner<T> {}
 
 impl<T> JoinHandleInner<T> {
     fn new() -> JoinHandleInner<T> {
@@ -28,20 +28,21 @@ pub struct JoinHandleSender<T> {
 impl<T> JoinHandleSender<T> {
     pub fn push(self, result: Result<T, Box<Any + Send + 'static>>) {
         let data = unsafe { &mut *self.inner.data.get() };
-        self.inner.barrier.signal_then(move || {
-            *data = Some(result);
-        })
+        *data = Some(result);
+        self.inner.barrier.signal();
     }
 }
 
 pub struct JoinHandleReceiver<T> {
     inner: Arc<JoinHandleInner<T>>,
+    received: bool,
 }
 
 impl<T> JoinHandleReceiver<T> {
-    pub fn pop(self) -> Result<T, Box<Any + Send + 'static>> {
+    pub fn pop(mut self) -> Result<T, Box<Any + Send + 'static>> {
         self.inner.barrier.wait().unwrap();
         let data = unsafe { &mut *self.inner.data.get() };
+        self.received = true;
         data.take().unwrap()
     }
 }
@@ -49,7 +50,7 @@ impl<T> JoinHandleReceiver<T> {
 pub fn handle_pair<T>() -> (JoinHandleSender<T>, JoinHandleReceiver<T>) {
     let inner = Arc::new(JoinHandleInner::new());
     let sender = JoinHandleSender { inner: inner.clone() };
-    let receiver = JoinHandleReceiver { inner: inner };
+    let receiver = JoinHandleReceiver { inner: inner, received: false };
     (sender, receiver)
 }
 

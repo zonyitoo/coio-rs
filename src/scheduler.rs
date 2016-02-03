@@ -38,28 +38,19 @@ use mio::util::Slab;
 use coroutine::{SendableCoroutinePtr, Handle, Coroutine, State};
 use options::Options;
 use runtime::processor::{Processor, ProcMessage};
-use sync::mpsc::Receiver;
+use join_handle::{self, JoinHandleReceiver};
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
-    result: Receiver<Result<T, Box<Any + Send + 'static>>>,
+    result: JoinHandleReceiver<T>,
 }
 
 impl<T> JoinHandle<T> {
-    /// Tries to join with the coroutine.
-    pub fn try_join(&self) -> Option<Result<T, Box<Any + Send + 'static>>> {
-        match self.result.try_recv() {
-            Ok(result) => Some(result),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => panic!("Failed to receive from the channel"),
-        }
-    }
-
     /// Join the coroutine until it finishes.
     ///
     /// If it already finished, this method will return immediately.
-    pub fn join(&self) -> Result<T, Box<Any + Send + 'static>> {
-        self.result.recv().expect("Failed to receive from the channel")
+    pub fn join(self) -> Result<T, Box<Any + Send + 'static>> {
+        self.result.pop()
     }
 }
 
@@ -175,8 +166,6 @@ impl Scheduler {
         Scheduler {
             expected_worker_count: 1,
 
-            // event_loop: EventLoop::new().unwrap(),
-            // io_handler: IoHandler::new(),
             event_loop_sender: None,
             work_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -255,12 +244,12 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let (tx, rx) = ::sync::mpsc::channel();
+        let (tx, rx) = join_handle::handle_pair();
         let wrapper = move || {
             let ret = unsafe { ::try(move || f()) };
 
             // No matter whether it is panicked or not, the result will be sent to the channel
-            let _ = tx.send(ret);
+            let _ = tx.push(ret);
         };
         let mut processor = Processor::current().unwrap();
         processor.spawn_opts(wrapper, opts);
