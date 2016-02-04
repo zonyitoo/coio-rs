@@ -26,7 +26,6 @@ use std::boxed::FnBox;
 use std::default::Default;
 use std::io;
 use std::mem;
-use std::sync::mpsc::{TryRecvError, RecvError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,14 +55,10 @@ impl<T> JoinHandle<T> {
 
 unsafe impl<T: Send> Send for JoinHandle<T> {}
 
-struct IoHandler {
-    slab: Slab<Option<(Handle, ReadyCallback<'static>)>>,
-}
+type RegisterCallback<'a> = &'a mut (FnMut(&mut EventLoop<Scheduler>, Token) -> bool);
+type ReadyCallback<'a> = &'a mut (FnMut(&mut EventLoop<Scheduler>));
 
-type RegisterCallback<'a> = &'a mut (FnMut(&mut EventLoop<IoHandler>, Token) -> bool);
-type ReadyCallback<'a> = &'a mut (FnMut(&mut EventLoop<IoHandler>));
-
-struct IoHandlerMessage {
+pub struct IoHandlerMessage {
     coroutine: Handle,
     register: RegisterCallback<'static>,
     ready: ReadyCallback<'static>,
@@ -92,9 +87,14 @@ impl IoHandlerMessage {
 
 unsafe impl Send for IoHandlerMessage {}
 
-impl Handler for IoHandler {
+pub enum EventLoopMessage {
+    IoHandlerMessage(IoHandlerMessage),
+    Shutdown,
+}
+
+impl Handler for Scheduler {
     type Timeout = Token;
-    type Message = IoHandlerMessage;
+    type Message = EventLoopMessage;
 
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
         trace!("Got {:?} for {:?}", events, token);
@@ -137,22 +137,21 @@ impl Handler for IoHandler {
     }
 
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
-        self.slab
-            .insert_with(move |token| {
-                if (msg.register)(event_loop, token) {
-                    Some((msg.coroutine, msg.ready))
-                } else {
-                    Scheduler::ready(msg.coroutine);
-                    None
-                }
-            })
-            .unwrap();
-    }
-}
-
-impl IoHandler {
-    fn new() -> IoHandler {
-        IoHandler { slab: Slab::new_starting_at(Token(1), 102400) }
+        match msg {
+            EventLoopMessage::IoHandlerMessage(msg) => {
+                self.slab
+                    .insert_with(move |token| {
+                        if (msg.register)(event_loop, token) {
+                            Some((msg.coroutine, msg.ready))
+                        } else {
+                            Scheduler::ready(msg.coroutine);
+                            None
+                        }
+                    })
+                    .unwrap();
+            }
+            EventLoopMessage::Shutdown => event_loop.shutdown(),
+        }
     }
 }
 
@@ -160,12 +159,11 @@ impl IoHandler {
 pub struct Scheduler {
     expected_worker_count: usize,
 
-    // // Mio event loop and the handler
-    // // It controls all I/O and timer waits
-    // event_loop: EventLoop<IoHandler>,
-    // io_handler: IoHandler,
-    event_loop_sender: Option<Sender<IoHandlerMessage>>,
+    // Mio event loop handler
+    event_loop_sender: Option<Sender<EventLoopMessage>>,
     work_count: Arc<AtomicUsize>,
+
+    slab: Slab<Option<(Handle, ReadyCallback<'static>)>>,
 }
 
 unsafe impl Send for Scheduler {}
@@ -179,6 +177,8 @@ impl Scheduler {
 
             event_loop_sender: None,
             work_count: Arc::new(AtomicUsize::new(0)),
+
+            slab: Slab::new_starting_at(Token(1), 102400),
         }
     }
 
@@ -295,15 +295,17 @@ impl Scheduler {
 
         let mut event_loop = EventLoop::new().unwrap();
         self.event_loop_sender = Some(event_loop.channel());
-        let mut io_handler = IoHandler::new();
 
-        let main_coro_rx = {
-            let (tx, rx) = ::sync::mpsc::channel();
+        let mut result = None;
+
+        let cloned_event_loop_sender = event_loop.channel();
+        {
+            let result = &mut result;
             let wrapper = move || {
                 let ret = unsafe { ::try(move || f()) };
 
-                // No matter whether it is panicked or not, the result will be sent to the channel
-                let _ = tx.send(ret);
+                *result = Some(ret);
+                cloned_event_loop_sender.send(EventLoopMessage::Shutdown).unwrap();
             };
 
             let f: Box<FnBox()> = Box::new(wrapper);
@@ -313,51 +315,25 @@ impl Scheduler {
             main_coro.attach(self.work_count.clone());
 
             machines[0].processor_handle.send(ProcMessage::Ready(main_coro)).unwrap();
-
-            match rx.try_recv() {
-                Err(TryRecvError::Empty) => {}
-                _ => panic!("nope"),
-            }
-
-            rx
         };
 
-        match main_coro_rx.try_recv() {
-            Err(TryRecvError::Empty) => {}
-            _ => panic!("nope"),
+        event_loop.run(self).unwrap();
+
+        trace!("Scheduler is going to shutdown, asking all the threads to shutdown");
+
+        for m in machines.iter() {
+            m.processor_handle.send(ProcMessage::Shutdown).unwrap();
         }
 
-        while self.work_count.load(Ordering::SeqCst) != 0 {
-            event_loop.run_once(&mut io_handler, Some(100)).unwrap();
+        // NOTE: It's critical that all threads are joined since Processor
+        // maintains a reference to this Scheduler using raw pointers.
+        for m in machines.drain(..) {
+            let _ = m.thread_handle.join();
         }
 
-        match main_coro_rx.recv() {
-            Ok(main_ret) => {
-                // Check again to be sure
-                while self.work_count.load(Ordering::SeqCst) != 0 {
-                    event_loop.run_once(&mut io_handler, Some(100)).unwrap();
-                }
+        trace!("Bye bye!");
 
-                trace!("Scheduler is going to shutdown, asking all the threads to shutdown");
-
-                for m in machines.iter() {
-                    m.processor_handle.send(ProcMessage::Shutdown).unwrap();
-                }
-
-                // NOTE: It's critical that all threads are joined since Processor
-                // maintains a reference to this Scheduler using raw pointers.
-                for m in machines.drain(..) {
-                    let _ = m.thread_handle.join();
-                }
-
-                trace!("Bye bye!");
-
-                return main_ret;
-            }
-            Err(RecvError) => {
-                panic!("Main coro is failed with RecvError");
-            }
-        }
+        result.unwrap()
     }
 
     /// Suspend the current coroutine or thread
@@ -390,7 +366,7 @@ impl Scheduler {
         let mut ret2 = Ok(());
 
         {
-            let mut reg = |evloop: &mut EventLoop<IoHandler>, token| {
+            let mut reg = |evloop: &mut EventLoop<Scheduler>, token| {
                 let r = evloop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot());
 
                 match r {
@@ -402,7 +378,7 @@ impl Scheduler {
                 }
             };
 
-            let mut ready = |evloop: &mut EventLoop<IoHandler>| {
+            let mut ready = |evloop: &mut EventLoop<Scheduler>| {
                 if cfg!(not(any(target_os = "macos",
                                 target_os = "ios",
                                 target_os = "freebsd",
@@ -412,12 +388,13 @@ impl Scheduler {
                 }
             };
 
-            let reg = &mut reg as &mut FnMut(&mut EventLoop<IoHandler>, Token) -> bool;
-            let ready = &mut ready as &mut FnMut(&mut EventLoop<IoHandler>);
+            let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
+            let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
 
             Scheduler::block_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                channel.send(IoHandlerMessage::new(coro, reg, ready)).unwrap();
+                let msg = IoHandlerMessage::new(coro, reg, ready);
+                channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();
             });
         }
 
@@ -430,7 +407,7 @@ impl Scheduler {
         let mut ret = Ok(());
 
         {
-            let mut reg = |evloop: &mut EventLoop<IoHandler>, token| {
+            let mut reg = |evloop: &mut EventLoop<Scheduler>, token| {
                 match evloop.timeout_ms(token, delay) {
                     Ok(..) => true,
                     Err(..) => {
@@ -440,14 +417,15 @@ impl Scheduler {
                 }
             };
 
-            let mut ready = move |_: &mut EventLoop<IoHandler>| {};
+            let mut ready = move |_: &mut EventLoop<Scheduler>| {};
 
-            let reg = &mut reg as &mut FnMut(&mut EventLoop<IoHandler>, Token) -> bool;
-            let ready = &mut ready as &mut FnMut(&mut EventLoop<IoHandler>);
+            let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
+            let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
 
             Scheduler::block_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                channel.send(IoHandlerMessage::new(coro, reg, ready)).unwrap();
+                let msg = IoHandlerMessage::new(coro, reg, ready);
+                channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();
             });
         }
 

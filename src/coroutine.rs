@@ -241,7 +241,7 @@ impl Drop for Coroutine {
                         Coroutine::resume(State::ForceUnwinding, self);
                     }
                 } else {
-                    trace!("Coroutine `{}` does not have a stack, so it doesn't need to do unwinding",
+                    trace!("Coroutine `{}` does not have a stack, so it doesn't need to be unwinded",
                            self.debug_name());
                 }
             }

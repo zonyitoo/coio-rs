@@ -244,6 +244,8 @@ impl Processor {
                                     });
 
                                     p.schedule();
+
+                                    trace!("Processor#{} is shutdown", processor_id);
                                 })
                                 .unwrap();
 
