@@ -112,6 +112,7 @@ impl<'a> ProcessorHandle<'a> {
     }
 
     #[inline]
+    #[allow(unused)]
     pub fn handle(&self) -> ProcMessageSender {
         self.0.handle()
     }

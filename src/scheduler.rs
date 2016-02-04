@@ -35,7 +35,7 @@ use std::thread;
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt, Sender};
 use mio::util::Slab;
 
-use coroutine::{SendableCoroutinePtr, Handle, Coroutine, State};
+use coroutine::{Handle, Coroutine, State};
 use options::Options;
 use runtime::processor::{Processor, ProcMessage};
 use join_handle::{self, JoinHandleReceiver};
@@ -57,19 +57,20 @@ impl<T> JoinHandle<T> {
 unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 struct IoHandler {
-    slab: Slab<Option<ReadyCallback<'static>>>,
+    slab: Slab<Option<(Handle, ReadyCallback<'static>)>>,
 }
 
 type RegisterCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>, Token) -> bool + Send + 'a>;
 type ReadyCallback<'a> = Box<FnBox(&mut EventLoop<IoHandler>) + Send + 'a>;
 
 struct IoHandlerMessage {
+    coroutine: Handle,
     register: RegisterCallback<'static>,
     ready: ReadyCallback<'static>,
 }
 
 impl IoHandlerMessage {
-    fn new<'scope, Reg, Ready>(reg: Reg, ready: Ready) -> IoHandlerMessage
+    fn new<'scope, Reg, Ready>(coro: Handle, reg: Reg, ready: Ready) -> IoHandlerMessage
         where Reg: FnOnce(&mut EventLoop<IoHandler>, Token) -> bool + Send + 'scope,
               Ready: FnOnce(&mut EventLoop<IoHandler>) + Send + 'scope
     {
@@ -82,6 +83,7 @@ impl IoHandlerMessage {
         };
 
         IoHandlerMessage {
+            coroutine: coro,
             register: reg,
             ready: ready,
         }
@@ -103,10 +105,14 @@ impl Handler for IoHandler {
         }
 
         match self.slab.remove(token) {
-            Some(cb) => cb.unwrap().call_box((event_loop,)),
+            Some(Some((coro, cb))) => {
+                cb.call_box((event_loop,));
+                Scheduler::ready(coro);
+            }
             None => {
                 warn!("No coroutine is waiting on token {:?}", token);
             }
+            _ => unreachable!(),
         }
     }
 
@@ -119,10 +125,14 @@ impl Handler for IoHandler {
         }
 
         match self.slab.remove(token) {
-            Some(cb) => cb.unwrap().call_box((event_loop,)),
+            Some(Some((coro, cb))) => {
+                cb.call_box((event_loop,));
+                Scheduler::ready(coro);
+            }
             None => {
                 warn!("No coroutine is waiting on token {:?}", token);
             }
+            _ => unreachable!(),
         }
     }
 
@@ -130,8 +140,9 @@ impl Handler for IoHandler {
         self.slab
             .insert_with(move |token| {
                 if msg.register.call_box((event_loop, token)) {
-                    Some(msg.ready)
+                    Some((msg.coroutine, msg.ready))
                 } else {
+                    Scheduler::ready(msg.coroutine);
                     None
                 }
             })
@@ -379,9 +390,6 @@ impl Scheduler {
         let mut ret = Ok(());
 
         Scheduler::block_with(|_, coro| {
-            let proc_hdl1 = Processor::current().unwrap().handle();
-            let proc_hdl2 = proc_hdl1.clone();
-            // let channel = self.event_loop.channel();
             let channel = self.event_loop_sender.as_ref().unwrap();
 
             struct EventedWrapper<E>(*const E);
@@ -392,8 +400,6 @@ impl Scheduler {
             let fd2 = EventedWrapper(fd);
             let ret1 = ResultWrapper(&mut ret);
             let ret2 = ResultWrapper(&mut ret);
-            let coro1 = SendableCoroutinePtr(Handle::into_raw(coro));
-            let coro2 = coro1;
 
             let reg = move |evloop: &mut EventLoop<IoHandler>, token| {
                 let fd = unsafe { &*fd1.0 };
@@ -404,8 +410,6 @@ impl Scheduler {
                     Ok(..) => true,
                     Err(..) => {
                         *ret = r;
-                        proc_hdl1.send(ProcMessage::Ready(unsafe { Handle::from_raw(coro1.0) }))
-                                 .unwrap();
                         false
                     }
                 }
@@ -421,11 +425,9 @@ impl Scheduler {
                     let ret = unsafe { &mut *ret2.0 };
                     *ret = evloop.deregister(fd);
                 }
-
-                proc_hdl2.send(ProcMessage::Ready(unsafe { Handle::from_raw(coro2.0) })).unwrap();
             };
 
-            channel.send(IoHandlerMessage::new(reg, ready)).unwrap();
+            channel.send(IoHandlerMessage::new(coro, reg, ready)).unwrap();
         });
 
         ret
@@ -437,7 +439,6 @@ impl Scheduler {
         let mut ret = Ok(());
 
         Scheduler::block_with(|_, coro| {
-            let proc_hdl = Processor::current().unwrap().handle();
             let channel = self.event_loop_sender.as_ref().unwrap();
 
             let ret1 = ResultWrapper(&mut ret);
@@ -454,11 +455,9 @@ impl Scheduler {
                 }
             };
 
-            let ready = move |_: &mut EventLoop<IoHandler>| {
-                proc_hdl.send(ProcMessage::Ready(coro)).unwrap();
-            };
+            let ready = move |_: &mut EventLoop<IoHandler>| {};
 
-            channel.send(IoHandlerMessage::new(reg, ready)).unwrap();
+            channel.send(IoHandlerMessage::new(coro, reg, ready)).unwrap();
         });
 
         ret

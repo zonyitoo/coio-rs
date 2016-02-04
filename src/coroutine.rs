@@ -62,10 +62,13 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
 pub struct Handle(Box<Coroutine>);
 
 impl Handle {
+    #[inline]
     pub unsafe fn from_raw(coro: *mut Coroutine) -> Handle {
         Handle(Box::from_raw(coro))
     }
 
+    #[inline]
+    #[allow(unused)]
     pub fn into_raw(self) -> *mut Coroutine {
         Box::into_raw(self.0)
     }
