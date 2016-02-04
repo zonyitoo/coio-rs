@@ -176,7 +176,7 @@ impl CoroMonoBarrier {
                 // We won! Is it a Coroutine?
                 if actual > READY {
                     // It's a Coroutine! ---> make it ready()
-                    let coro: Handle = unsafe { Box::from_raw(actual) };
+                    let coro: Handle = unsafe { Handle::from_raw(actual) };
                     Scheduler::ready(coro);
                 }
 
@@ -196,7 +196,7 @@ impl Drop for CoroMonoBarrier {
 
         let lock = self.lock.swap(EMPTY, Ordering::SeqCst);
         if lock > READY {
-            let coro = unsafe { Box::from_raw(lock) };
+            let coro = unsafe { Handle::from_raw(lock) };
             drop(coro);
         }
     }

@@ -392,7 +392,7 @@ impl Scheduler {
             let fd2 = EventedWrapper(fd);
             let ret1 = ResultWrapper(&mut ret);
             let ret2 = ResultWrapper(&mut ret);
-            let coro1 = SendableCoroutinePtr(Box::into_raw(coro));
+            let coro1 = SendableCoroutinePtr(Handle::into_raw(coro));
             let coro2 = coro1;
 
             let reg = move |evloop: &mut EventLoop<IoHandler>, token| {
@@ -404,7 +404,7 @@ impl Scheduler {
                     Ok(..) => true,
                     Err(..) => {
                         *ret = r;
-                        proc_hdl1.send(ProcMessage::Ready(unsafe { Box::from_raw(coro1.0) }))
+                        proc_hdl1.send(ProcMessage::Ready(unsafe { Handle::from_raw(coro1.0) }))
                                  .unwrap();
                         false
                     }
@@ -422,7 +422,7 @@ impl Scheduler {
                     *ret = evloop.deregister(fd);
                 }
 
-                proc_hdl2.send(ProcMessage::Ready(unsafe { Box::from_raw(coro2.0) })).unwrap();
+                proc_hdl2.send(ProcMessage::Ready(unsafe { Handle::from_raw(coro2.0) })).unwrap();
             };
 
             channel.send(IoHandlerMessage::new(reg, ready)).unwrap();

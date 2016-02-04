@@ -25,6 +25,7 @@ use std::ptr;
 use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
 
 use libc;
 
@@ -57,7 +58,33 @@ extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
     unreachable!();
 }
 
-pub type Handle = Box<Coroutine>;
+/// Handle for a Coroutine
+pub struct Handle(Box<Coroutine>);
+
+impl Handle {
+    pub unsafe fn from_raw(coro: *mut Coroutine) -> Handle {
+        Handle(Box::from_raw(coro))
+    }
+
+    pub fn into_raw(self) -> *mut Coroutine {
+        Box::into_raw(self.0)
+    }
+}
+
+unsafe impl Send for Handle {}
+
+impl Deref for Handle {
+    type Target = Coroutine;
+    fn deref(&self) -> &Coroutine {
+        &*self.0
+    }
+}
+
+impl DerefMut for Handle {
+    fn deref_mut(&mut self) -> &mut Coroutine {
+        &mut *self.0
+    }
+}
 
 /// Coroutine is nothing more than a context and a stack
 pub struct Coroutine {
@@ -75,7 +102,7 @@ unsafe impl Send for Coroutine {}
 
 impl Coroutine {
     fn new(ctx: Context, stack: Option<Stack>, runnable: Option<Box<FnBox()>>) -> Handle {
-        Box::new(Coroutine {
+        let boxed_coro = Box::new(Coroutine {
             context: ctx,
             stack: stack,
             preferred_processor: None,
@@ -84,7 +111,8 @@ impl Coroutine {
             name: None,
             final_yield_to: ptr::null_mut(),
             global_work_count: None,
-        })
+        });
+        Handle(boxed_coro)
     }
 
     #[allow(unused)]
