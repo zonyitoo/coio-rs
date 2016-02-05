@@ -128,6 +128,18 @@ impl<'a> ProcessorHandle<'a> {
     }
 
     #[inline]
+    pub fn spawn<F>(&mut self, f: F)
+        where F: FnOnce() + Send + 'static
+    {
+        let opts = match self.0.default_stack_size {
+            Some(sz) => Options::new().stack_size(sz),
+            None => Options::new(),
+        };
+
+        self.spawn_opts(f, opts)
+    }
+
+    #[inline]
     pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
         where F: FnOnce() + Send + 'static
     {
@@ -187,6 +199,9 @@ pub struct ProcessorInner {
 
     thread_handle: Option<Thread>,
     should_wake_up: AtomicBool,
+
+    // Default stack size for spawning coroutines
+    default_stack_size: Option<usize>,
 }
 
 impl ProcessorInner {
@@ -204,7 +219,7 @@ impl Drop for ProcessorInner {
 }
 
 impl Processor {
-    pub fn new(sched: *mut Scheduler, processor_id: usize) -> Machine {
+    pub fn new(sched: *mut Scheduler, processor_id: usize, default_stack_size: Option<usize>) -> Machine {
         let (worker, stealer) = deque::new();
         let (tx, rx) = mpsc::channel();
 
@@ -233,6 +248,8 @@ impl Processor {
 
                 thread_handle: None,
                 should_wake_up: AtomicBool::new(false),
+
+                default_stack_size: default_stack_size,
             }),
         };
 

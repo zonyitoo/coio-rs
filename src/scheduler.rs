@@ -23,7 +23,6 @@
 
 use std::any::Any;
 use std::boxed::FnBox;
-use std::default::Default;
 use std::io::{self, Write};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -159,6 +158,7 @@ impl Handler for Scheduler {
 /// Coroutine scheduler
 pub struct Scheduler {
     expected_worker_count: usize,
+    default_stack_size: Option<usize>,
 
     // Mio event loop handler
     event_loop_sender: Option<Sender<EventLoopMessage>>,
@@ -175,6 +175,7 @@ impl Scheduler {
     pub fn new() -> Scheduler {
         Scheduler {
             expected_worker_count: 1,
+            default_stack_size: None,
 
             event_loop_sender: None,
             work_count: Arc::new(AtomicUsize::new(0)),
@@ -187,6 +188,12 @@ impl Scheduler {
     pub fn with_workers(mut self, workers: usize) -> Scheduler {
         assert!(workers >= 1, "Must have at least one worker");
         self.expected_worker_count = workers;
+        self
+    }
+
+    /// Set the default stack size
+    pub fn default_stack_size(mut self, default_stack_size: usize) -> Scheduler {
+        self.default_stack_size = Some(default_stack_size);
         self
     }
 
@@ -251,7 +258,17 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        Scheduler::spawn_opts(f, Default::default())
+        let (tx, rx) = join_handle::handle_pair();
+        let wrapper = move || {
+            let ret = unsafe { ::try(move || f()) };
+
+            // No matter whether it is panicked or not, the result will be sent to the channel
+            let _ = tx.push(ret);
+        };
+        let mut processor = Processor::current().unwrap();
+        processor.spawn(wrapper);
+
+        JoinHandle { result: rx }
     }
 
     /// Spawn a new coroutine with options
@@ -292,7 +309,7 @@ impl Scheduler {
         let mut machines = Vec::with_capacity(self.expected_worker_count);
 
         for tid in 0..self.expected_worker_count {
-            machines.push(Processor::new(self, tid));
+            machines.push(Processor::new(self, tid, self.default_stack_size));
         }
 
         for x in 0..machines.len() {
