@@ -141,6 +141,11 @@ impl<'a> ProcessorHandle<'a> {
     pub fn begin_unwind(&mut self, raw_coro: &mut Coroutine) {
         unsafe { self.0.toggle_unwinding(raw_coro) }
     }
+
+    #[inline]
+    pub fn current(&self) -> Option<&Handle> {
+        self.0.current_coro.as_ref()
+    }
 }
 
 #[derive(Clone)]

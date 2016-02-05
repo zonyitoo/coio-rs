@@ -24,12 +24,13 @@
 use std::any::Any;
 use std::boxed::FnBox;
 use std::default::Default;
-use std::io;
+use std::io::{self, Write};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::thread;
+use std::panic;
 
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt, Sender};
 use mio::util::Slab;
@@ -276,6 +277,18 @@ impl Scheduler {
         where F: FnOnce() -> T + Send,
               T: Send
     {
+        let default_handler = panic::take_handler();
+        panic::set_handler(move|panic_info| {
+            if let Some(p) = Processor::current() {
+                if let Some(c) = p.current() {
+                    let mut stderr = io::stderr();
+                    let _ = write!(stderr, "Coroutine `{}` running in ", c.debug_name());
+                }
+            }
+
+            default_handler(panic_info);
+        });
+
         let mut machines = Vec::with_capacity(self.expected_worker_count);
 
         for tid in 0..self.expected_worker_count {
@@ -336,6 +349,9 @@ impl Scheduler {
         for m in machines.drain(..) {
             let _ = m.thread_handle.join();
         }
+
+        // Restore panic handler
+        panic::take_handler();
 
         result.unwrap()
     }
