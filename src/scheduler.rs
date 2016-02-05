@@ -305,6 +305,12 @@ impl Scheduler {
                 let ret = unsafe { ::try(move || f()) };
 
                 *result = Some(ret);
+
+                trace!("Main coroutine is finished with result {}, going to shutdown",
+                       match result.as_ref().unwrap() {
+                           &Ok(..) => "Ok(..)",
+                           &Err(..) => "Err(..)",
+                       });
                 cloned_event_loop_sender.send(EventLoopMessage::Shutdown).unwrap();
             };
 
@@ -330,8 +336,6 @@ impl Scheduler {
         for m in machines.drain(..) {
             let _ = m.thread_handle.join();
         }
-
-        trace!("Bye bye!");
 
         result.unwrap()
     }

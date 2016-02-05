@@ -149,7 +149,6 @@ pub struct Processor {
 }
 
 unsafe impl Send for Processor {}
-unsafe impl Sync for Processor {}
 
 impl fmt::Debug for Processor {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -190,6 +189,12 @@ impl ProcessorInner {
         // This flag should always set to true when we have job to do
         self.should_wake_up.store(true, Ordering::SeqCst);
         self.thread_handle.as_ref().map(|x| x.unpark());
+    }
+}
+
+impl Drop for ProcessorInner {
+    fn drop(&mut self) {
+        self.main_coro.set_state(State::Finished);
     }
 }
 

@@ -185,6 +185,7 @@ impl Coroutine {
             let mut dummy = Coroutine::empty_on_stack();
             target.set_state(state);
             dummy.raw_yield_to(target);
+            dummy.set_state(State::Finished);
         }
     }
 
