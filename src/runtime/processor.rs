@@ -453,14 +453,6 @@ impl DerefMut for Processor {
     }
 }
 
-impl PartialEq for Processor {
-    fn eq(&self, other: &Processor) -> bool {
-        (self as *const Processor) == (other as *const Processor)
-    }
-}
-
-impl Eq for Processor {}
-
 // For coroutine.rs
 #[derive(Clone)]
 pub struct WeakProcessor {
