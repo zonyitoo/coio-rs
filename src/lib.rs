@@ -35,8 +35,9 @@ extern crate libc;
 use std::thread;
 use std::panic;
 use std::time::Duration;
+use std::any::Any;
 
-pub use scheduler::{Scheduler, JoinHandle};
+pub use scheduler::JoinHandle;
 pub use options::Options;
 pub use promise::Promise;
 
@@ -73,26 +74,16 @@ pub fn sched() {
     Scheduler::sched()
 }
 
-/// Run the scheduler with threads
-// #[inline(always)]
-// pub fn run(threads: usize) {
-//     Scheduler::run(threads)
-// }
-
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
 pub fn sleep_ms(ms: u64) {
-    if let Some(s) = Scheduler::instance() {
-        s.sleep_ms(ms).unwrap();
-    }
+    Scheduler::sleep(Duration::from_millis(ms))
 }
 
 /// Put the current coroutine to sleep for the specific amount of time
 #[inline]
 pub fn sleep(duration: Duration) {
-    if let Some(s) = Scheduler::instance() {
-        s.sleep(duration).unwrap();
-    }
+    Scheduler::sleep(duration)
 }
 
 /// Coroutine configuration. Provides detailed control over the properties and behavior of new coroutines.
@@ -129,6 +120,73 @@ impl Builder {
               T: Send + 'static
     {
         Scheduler::spawn_opts(f, self.opts)
+    }
+}
+
+/// Coroutine Scheduler
+pub struct Scheduler(scheduler::Scheduler);
+
+impl Scheduler {
+    /// Create a new Scheduler with default configuration
+    pub fn new() -> Scheduler {
+        Scheduler(scheduler::Scheduler::new())
+    }
+
+    /// Set the number of workers
+    #[inline(always)]
+    pub fn with_workers(self, workers: usize) -> Scheduler {
+        Scheduler(self.0.with_workers(workers))
+    }
+
+    /// Set the default stack size
+    #[inline(always)]
+    pub fn default_stack_size(self, default_stack_size: usize) -> Scheduler {
+        Scheduler(self.0.default_stack_size(default_stack_size))
+    }
+
+    /// Get the total work count
+    #[inline(always)]
+    pub fn work_count(&self) -> usize {
+        self.0.work_count()
+    }
+
+    /// Spawn a new coroutine with default options
+    pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
+    {
+        scheduler::Scheduler::spawn(f)
+    }
+
+    /// Spawn a new coroutine with options
+    pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
+    {
+        scheduler::Scheduler::spawn_opts(f, opts)
+    }
+
+    /// Run the scheduler
+    pub fn run<F, T>(&mut self, f: F) -> Result<T, Box<Any + Send>>
+        where F: FnOnce() -> T + Send,
+              T: Send
+    {
+        self.0.run(f)
+    }
+
+    /// Yield the current coroutine
+    #[inline]
+    pub fn sched() {
+        scheduler::Scheduler::sched()
+    }
+
+    /// Put the current coroutine to sleep for the specific amount of time
+    #[inline]
+    pub fn sleep(duration: Duration) {
+        match scheduler::Scheduler::instance() {
+            None => thread::sleep(duration),
+            Some(s) => s.sleep(duration).unwrap(),
+        }
     }
 }
 
