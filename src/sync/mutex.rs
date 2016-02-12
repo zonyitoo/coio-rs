@@ -36,7 +36,7 @@ pub type TryLockResult<G> = Result<G, PoisonError<G>>;
 /// A mutual exclusion primitive useful for protecting shared data
 pub struct Mutex<T> {
     data: UnsafeCell<T>,
-    lock: AtomicBool, // false if locked
+    lock: AtomicBool, // true if locked
 
     wait_list: ::std::sync::Mutex<Vec<Handle>>,
 }
@@ -56,7 +56,7 @@ impl<T> Mutex<T> {
     /// Acquires a mutex, blocking the current thread until it is able to do so.
     pub fn lock<'a>(&'a self) -> LockResult<Guard<'a, T>> {
         // 1. Try to lock with the atomic boolean
-        while self.lock.compare_and_swap(false, true, Ordering::SeqCst) != false {
+        while self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
             // 2. Otherwise yield
             Scheduler::block_with(|_, coro| {
                 // 3. Get the lock of wait list
@@ -64,7 +64,7 @@ impl<T> Mutex<T> {
 
                 // 4. Try again to ensure no one is releasing the lock while we
                 //    are trying to add ourselves into the wait list
-                if self.lock.compare_and_swap(false, true, Ordering::SeqCst) == false {
+                if self.lock.compare_and_swap(false, true, Ordering::Acquire) == false {
                     // 4.1. Wow, got the lock!
                     Scheduler::ready(coro);
                 } else {
@@ -78,7 +78,7 @@ impl<T> Mutex<T> {
     }
 
     pub fn try_lock<'a>(&'a self) -> TryLockResult<Guard<'a, T>> {
-        if self.lock.compare_and_swap(false, true, Ordering::SeqCst) != false {
+        if self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
             Err(PoisonError::new(Guard::new(unsafe { &mut *self.data.get() }, self)))
         } else {
             Ok(Guard::new(unsafe { &mut *self.data.get() }, self))
@@ -115,7 +115,7 @@ impl<'a, T: 'a> Drop for Guard<'a, T> {
             }
         }
 
-        while self.mutex.lock.compare_and_swap(true, false, Ordering::SeqCst) == true {}
+        self.mutex.lock.store(false, Ordering::Release);
     }
 }
 

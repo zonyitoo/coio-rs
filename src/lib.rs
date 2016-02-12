@@ -22,7 +22,15 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(recover, std_panic, reflect_marker, fnbox, arc_counts, panic_propagate, panic_handler)]
+#![feature(
+    arc_counts,
+    fnbox,
+    panic_handler,
+    panic_propagate,
+    recover,
+    reflect_marker,
+    std_panic,
+)]
 
 #[macro_use]
 extern crate log;
@@ -30,7 +38,6 @@ extern crate context;
 extern crate mio;
 extern crate deque;
 extern crate rand;
-extern crate libc;
 
 use std::thread;
 use std::panic;
@@ -40,6 +47,9 @@ use std::any::Any;
 pub use scheduler::JoinHandle;
 pub use options::Options;
 pub use promise::Promise;
+
+use runtime::Processor;
+use coroutine::{Handle, State};
 
 pub mod net;
 pub mod sync;
@@ -123,6 +133,43 @@ impl Builder {
     }
 }
 
+/// Public API for a Coroutine
+pub struct Coroutine(Handle);
+
+impl Coroutine {
+    #[inline(always)]
+    pub fn set_name(&mut self, name: String) {
+        self.0.set_name(name);
+    }
+
+    #[inline(always)]
+    pub fn name(&self) -> Option<&str> {
+        self.0.name()
+    }
+}
+
+/// Public API for a Coroutine reference
+pub struct CoroutineRef<'a>(&'a mut Handle);
+
+impl<'a> CoroutineRef<'a> {
+    #[inline(always)]
+    pub fn set_name(&mut self, name: String) {
+        self.0.set_name(name);
+    }
+
+    #[inline(always)]
+    pub fn name(&self) -> Option<&str> {
+        self.0.name()
+    }
+
+    /// Yield the current Coroutine
+    #[inline]
+    pub fn sched(&mut self) {
+        // The same as Processor::sched
+        self.0.yield_with(State::Suspended, 0);
+    }
+}
+
 /// Coroutine Scheduler
 pub struct Scheduler(scheduler::Scheduler);
 
@@ -168,8 +215,8 @@ impl Scheduler {
 
     /// Run the scheduler
     pub fn run<F, T>(&mut self, f: F) -> Result<T, Box<Any + Send>>
-        where F: FnOnce() -> T + Send,
-              T: Send
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
     {
         self.0.run(f)
     }
@@ -187,6 +234,24 @@ impl Scheduler {
             None => thread::sleep(duration),
             Some(s) => s.sleep(duration).unwrap(),
         }
+    }
+
+    /// Block the current coroutine
+    #[inline]
+    pub fn block_with<'scope, F>(f: F)
+        where F: FnOnce(&mut Processor, Coroutine) + 'scope,
+    {
+        Processor::current().map(|x| x.block_with(|p, coro| f(p, Coroutine(coro)))).unwrap()
+    }
+
+    /// Run a Coroutine in this scheduler
+    pub fn ready(coro: Coroutine) {
+        scheduler::Scheduler::ready(coro.0)
+    }
+
+    /// Get the current Coroutine
+    pub fn current() -> Option<CoroutineRef<'static>> {
+        Processor::instance().and_then(|p| p.current_coroutine().map(CoroutineRef))
     }
 }
 
