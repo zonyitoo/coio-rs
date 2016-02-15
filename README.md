@@ -13,7 +13,7 @@ Coroutine scheduling with work-stealing algorithm.
 ## Usage
 
 ```toml
-[dependencies]
+[dependencies.coio]
 git = "https://github.com/zonyitoo/coio-rs.git"
 ```
 
