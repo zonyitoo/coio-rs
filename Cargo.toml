@@ -10,17 +10,14 @@ keywords = ["coroutine", "fiber", "green", "green thread", "non-blocking", "io",
 name = "coio"
 
 [dev-dependencies]
-clap = "*"
-env_logger = "*"
-num_cpus = "*"
-rand = "*"
-time = "*"
+clap = "2.1"
+env_logger = "0.3"
+num_cpus = "0.2"
+time = "0.1"
 
 [dependencies]
-chrono = "^0.2.15"
-context = { git = "https://github.com/zonyitoo/context-rs.git" }
-deque = "^0.3.1"
-libc = "^0.1.10"
-log = "^0.3.1"
-mio = "^0.5.0"
-rand = "^0.3.10"
+context = "1.0"
+deque = "0.3"
+log = "0.3"
+mio = "0.5"
+rand = "0.3"

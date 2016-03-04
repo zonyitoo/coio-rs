@@ -20,173 +20,160 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use std::boxed::FnBox;
-use std::cell::UnsafeCell;
-use std::ptr;
-use std::panic;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::panic;
+use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::usize;
 
-use libc;
-
-use context::{Context, Stack};
-use context::stack::StackPool;
+use context::{Context, Transfer};
+use context::stack::ProtectedFixedSizeStack;
 
 use runtime::processor::{Processor, WeakProcessor};
 use options::Options;
 
-thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPool::new()));
+extern "C" fn coroutine_entry(t: Transfer) -> ! {
+    // Take over the data from Coroutine::spawn_opts
+    let InitData { stack, callback } = unsafe {
+        let data_opt_ref = &mut *(t.data as *mut Option<InitData>);
+        data_opt_ref.take().unwrap()
+    };
+
+    // This block will ensure the `meta` will be destroied before dropping the stack
+    let ctx = {
+        let mut meta = Coroutine {
+            context: None,
+            global_work_count: None,
+            name: None,
+            preferred_processor: None,
+            state: State::Initialized,
+        };
+
+        // Yield back after take out the callback function
+        // Now the Coroutine is initialized
+        let meta_ptr = &mut meta as *mut _ as usize;
+        let _ = unsafe {
+            ::try(move || {
+                let Transfer { context: ctx, .. } = t.context.resume(meta_ptr);
+                let meta_ref = &mut *(meta_ptr as *mut Coroutine);
+                meta_ref.context = Some(ctx);
+
+                // Take out the callback and run it
+                callback();
+
+                trace!("Coroutine `{}` finished its callback, going to cleanup",
+                       meta_ref.debug_name());
+            })
+        };
+
+        trace!("Coroutine `{}` is going to drop its stack",
+               meta.debug_name());
+
+        // If panicked inside, the meta.context stores the actual return Context
+        meta.context.take().unwrap()
+    };
+
+    // Drop the stack after it is finished
+    let mut stack_opt = Some(stack);
+    ctx.resume_ontop(&mut stack_opt as *mut _ as usize, coroutine_exit);
+
+    unreachable!();
+}
+
+extern "C" fn coroutine_exit(mut t: Transfer) -> Transfer {
+    unsafe {
+        // Drop the stack
+        let stack_ref = &mut *(t.data as *mut Option<ProtectedFixedSizeStack>);
+        let _ = stack_ref.take();
+    }
+
+    t.data = usize::MAX;
+    t
+}
+
+extern "C" fn coroutine_unwind(t: Transfer) -> Transfer {
+    // Save the Context in the Coroutine object
+    // because the `t` won't be able to be passed to the caller
+    unsafe {
+        let coro = &mut *(t.data as *mut Coroutine);
+        coro.context = Some(t.context);
+    }
+
+    panic::propagate(Box::new(ForceUnwind));
+}
 
 #[derive(Debug)]
 pub struct ForceUnwind;
 
-/// Initialization function for make context
-extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
-    let coro: &mut Coroutine = unsafe { &mut *(f as *mut Coroutine) };
-    {
-        if let Some(f) = coro.runnable.take() {
-            f();
-        }
-    }
-
-    unsafe {
-        debug_assert!(coro.final_yield_to != ptr::null_mut(),
-                      "Final yield to target is a nullptr, which is impossible");
-        let final_yield_to: &mut Coroutine = &mut *coro.final_yield_to;
-        coro.yield_to(State::Finished, final_yield_to);
-    }
-    unreachable!();
+struct InitData {
+    stack: ProtectedFixedSizeStack,
+    callback: Box<FnBox()>,
 }
 
-/// Handle for a Coroutine
-pub struct Handle(Box<Coroutine>);
-
-impl Handle {
-    #[inline]
-    pub unsafe fn from_raw(coro: *mut Coroutine) -> Handle {
-        Handle(Box::from_raw(coro))
-    }
-
-    #[inline]
-    #[allow(unused)]
-    pub fn into_raw(self) -> *mut Coroutine {
-        Box::into_raw(self.0)
-    }
-}
-
-unsafe impl Send for Handle {}
-
-impl Deref for Handle {
-    type Target = Coroutine;
-    fn deref(&self) -> &Coroutine {
-        &*self.0
-    }
-}
-
-impl DerefMut for Handle {
-    fn deref_mut(&mut self) -> &mut Coroutine {
-        &mut *self.0
-    }
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum State {
+    Initialized,
+    Suspended,
+    Running,
+    Blocked,
 }
 
 /// Coroutine is nothing more than a context and a stack
 pub struct Coroutine {
-    context: Context,
-    stack: Option<Stack>,
+    context: Option<Context>,
+    global_work_count: Option<Arc<AtomicUsize>>,
+    name: Option<String>,
     preferred_processor: Option<WeakProcessor>,
     state: State,
-    runnable: Option<Box<FnBox()>>,
-    name: Option<String>,
-    final_yield_to: *mut Coroutine,
-    global_work_count: Option<Arc<AtomicUsize>>,
 }
 
 unsafe impl Send for Coroutine {}
 
-impl Coroutine {
-    fn new(ctx: Context, stack: Option<Stack>, runnable: Option<Box<FnBox()>>) -> Handle {
-        let boxed_coro = Box::new(Coroutine {
-            context: ctx,
-            stack: stack,
-            preferred_processor: None,
-            state: State::Initialized,
-            runnable: runnable,
-            name: None,
-            final_yield_to: ptr::null_mut(),
-            global_work_count: None,
-        });
-        Handle(boxed_coro)
-    }
-
-    #[allow(unused)]
-    pub unsafe fn empty() -> Handle {
-        Coroutine::new(Context::empty(), None, None)
-    }
-
-    pub unsafe fn empty_on_stack() -> Coroutine {
-        Coroutine {
-            context: Context::empty(),
-            stack: None,
-            preferred_processor: None,
-            state: State::Initialized,
-            runnable: None,
-            name: None,
-            final_yield_to: ptr::null_mut(),
-            global_work_count: None,
+impl Drop for Coroutine {
+    fn drop(&mut self) {
+        if let Some(gwc) = self.global_work_count.as_ref() {
+            gwc.fetch_sub(1, Ordering::SeqCst);
         }
     }
+}
 
-    #[inline]
-    pub fn set_name(&mut self, name: String) {
-        self.name = Some(name);
-    }
-
-    #[inline]
+impl Coroutine {
     pub fn attach(&mut self, gwc: Arc<AtomicUsize>) {
         gwc.fetch_add(1, Ordering::SeqCst);
         self.global_work_count = Some(gwc);
     }
 
-    pub fn spawn_opts(f: Box<FnBox()>, opts: Options) -> Handle {
-        let stack = STACK_POOL.with(|pool| unsafe {
-            (&mut *pool.get()).take_stack(opts.stack_size)
-        });
-
-        let mut coro = Coroutine::new(Context::empty(), Some(stack), Some(f));
-        coro.name = opts.name;
-        let coro_ptr: *mut Coroutine = &mut *coro as *mut Coroutine;
-        let stack_ptr: *mut Stack = coro.stack.as_mut().unwrap();
-        coro.context.init_with(coroutine_initialize,
-                               0,
-                               coro_ptr as *mut libc::c_void,
-                               unsafe { &mut *stack_ptr });
-        coro
+    #[inline]
+    pub fn spawn_opts<F>(f: F, opts: Options) -> Handle
+        where F: FnOnce() + Send + 'static
+    {
+        Self::spawn_opts_impl(Box::new(f), opts)
     }
 
-    pub fn yield_to(&mut self, state: State, target: &mut Coroutine) {
-        self.set_state(state);
-        target.set_state(State::Running);
-        unsafe {
-            self.raw_yield_to(target);
-        }
-    }
+    fn spawn_opts_impl(f: Box<FnBox()>, opts: Options) -> Handle {
+        let data = InitData {
+            stack: ProtectedFixedSizeStack::new(opts.stack_size).unwrap(),
+            callback: f,
+        };
 
-    pub unsafe fn raw_yield_to(&mut self, target: &mut Coroutine) {
-        target.final_yield_to = self;
-        Context::swap(&mut self.context, &target.context);
+        let context = Context::new(&data.stack, coroutine_entry);
 
-        if let State::ForceUnwinding = self.state() {
-            panic::propagate(Box::new(ForceUnwind));
-        }
-    }
+        // Give him the initialization data
+        let mut data_opt = Some(data);
+        let t = context.resume(&mut data_opt as *mut _ as usize);
+        debug_assert!(data_opt.is_none());
 
-    pub fn resume(state: State, target: &mut Coroutine) {
-        unsafe {
-            let mut dummy = Coroutine::empty_on_stack();
-            target.set_state(state);
-            dummy.raw_yield_to(target);
-            dummy.set_state(State::Finished);
+        let coro_ref = unsafe { &mut *(t.data as *mut Coroutine) };
+        coro_ref.context = Some(t.context);
+
+        if let Some(name) = opts.name {
+            coro_ref.set_name(name);
         }
+
+        // Done!
+        Handle(coro_ref)
     }
 
     pub fn set_preferred_processor(&mut self, preferred_processor: Option<WeakProcessor>) {
@@ -208,78 +195,108 @@ impl Coroutine {
     }
 
     #[inline]
+    pub fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.name.as_ref().map(|x| &x[..])
     }
 
-    #[inline]
-    pub fn name_or<'a>(&'a self, default: &'a str) -> &'a str {
-        self.name().unwrap_or(default)
-    }
-
-    #[inline]
     pub fn debug_name(&self) -> &str {
-        self.name_or("<unnamed>")
+        self.name().unwrap_or("<unnamed>")
     }
 }
-
-impl Drop for Coroutine {
-    fn drop(&mut self) {
-        trace!("Dropping Coroutine `{}` with state: {:?}", self.debug_name(), self.state());
-
-        match self.state() {
-            State::Initialized | State::Finished => {}
-            _ => {
-                // Unwind the stack only if it actually has a stack!
-                if self.stack.is_some() {
-                    if let Some(mut p) = Processor::current() {
-                        trace!("Coroutine `{}` is force-unwinding with processors", self.debug_name());
-                        p.begin_unwind(self);
-                    } else {
-                        // This would happen if all the processors are gone just before
-                        // the container that holding the Handle of this coroutine is dropping
-                        trace!("Coroutine `{}` is force-unwinding without processors", self.debug_name());
-                        Coroutine::resume(State::ForceUnwinding, self);
-                    }
-                } else {
-                    trace!("Coroutine `{}` does not have a stack, so it doesn't need to be unwinded",
-                           self.debug_name());
-                }
-            }
-        }
-
-        if let Some(gwc) = self.global_work_count.as_ref() {
-            gwc.fetch_sub(1, Ordering::SeqCst);
-        }
-
-        match self.stack.take() {
-            None => {}
-            Some(st) => {
-                STACK_POOL.with(|pool| unsafe {
-                    let pool: &mut StackPool = &mut *pool.get();
-                    pool.give_stack(st);
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum State {
-    Initialized,
-    Suspended,
-    Running,
-    Blocked,
-    Finished,
-    ForceUnwinding,
-}
-
-pub type Result<T> = ::std::result::Result<T, ()>;
 
 /// Sendable coroutine mutable pointer
 #[derive(Copy, Clone, Debug)]
 pub struct SendableCoroutinePtr(pub *mut Coroutine);
 unsafe impl Send for SendableCoroutinePtr {}
+
+/// Handle for a Coroutine
+pub struct Handle(*mut Coroutine);
+
+impl Handle {
+    /// Check if the Coroutine is already finished
+    #[doc(hidden)]
+    #[inline]
+    pub fn is_finished(&self) -> bool {
+        self.0 == ptr::null_mut()
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn from_raw(coro: *mut Coroutine) -> Handle {
+        Handle(coro)
+    }
+
+    /// Resume the Coroutine
+    #[doc(hidden)]
+    pub fn resume(&mut self, data: usize) -> usize {
+        debug_assert!(data != usize::MAX);
+        self.yield_with(State::Running, data)
+    }
+
+    /// Yield the Coroutine to its parent with data
+    #[inline(never)]
+    pub fn yield_with(&mut self, state: State, data: usize) -> usize {
+        debug_assert!(data != usize::MAX);
+
+        let coro = unsafe { &mut *self.0 };
+        coro.set_state(state);
+
+        let context = coro.context.take().unwrap();
+        let Transfer { context, data } = context.resume(data);
+
+        // We've returned from a yield to the Processor, because it resume()d us!
+        // `context` is the Context of the Processor which we store so we can yield back to it.
+        if data != usize::MAX {
+            coro.context = Some(context);
+        } else {
+            self.0 = ptr::null_mut();
+        }
+
+        data
+    }
+}
+
+unsafe impl Send for Handle {}
+
+impl Deref for Handle {
+    type Target = Coroutine;
+    fn deref(&self) -> &Coroutine {
+        unsafe { &*self.0 }
+    }
+}
+
+impl DerefMut for Handle {
+    fn deref_mut(&mut self) -> &mut Coroutine {
+        unsafe { &mut *self.0 }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if self.is_finished() {
+            return;
+        }
+
+        trace!("Force-unwind Coroutine `{}`", self.debug_name());
+
+        let ctx = self.context.take().unwrap();
+        ctx.resume_ontop(self.0 as *mut Coroutine as usize, coroutine_unwind);
+    }
+}
+
+impl fmt::Debug for Handle {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.is_finished() {
+            write!(f, "Coroutine(.., Finished)")
+        } else {
+            write!(f, "Coroutine({}, {:?})", self.debug_name(), self.state())
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -287,6 +304,9 @@ mod test {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use scheduler::Scheduler;
+    use options::Options;
+
+    use super::*;
 
     #[test]
     fn coroutine_unwinds_on_drop() {
@@ -297,7 +317,7 @@ mod test {
 
             Scheduler::new()
                 .run(|| {
-                    let handle = Scheduler::spawn(|| {
+                    let handle = Scheduler::spawn(move || {
                         struct Test(Arc<AtomicUsize>);
 
                         impl Drop for Test {
@@ -307,15 +327,24 @@ mod test {
                         }
 
                         let test = Test(shared_usize);
-                        Scheduler::block_with(|_, _| {});
+
+                        Scheduler::block_with(|_, coro| drop(coro));
                         test.0.store(2, Ordering::SeqCst);
                     });
 
-                    let _ = handle.join();
+                    let result = handle.join();
+                    assert!(result.is_err());
                 })
                 .unwrap();
         }
 
         assert_eq!(shared_usize.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn coroutine_drop_after_initialized() {
+        let f = || {};
+        let coro = Coroutine::spawn_opts(f, Options::default());
+        drop(coro);
     }
 }

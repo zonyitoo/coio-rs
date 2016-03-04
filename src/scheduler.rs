@@ -22,7 +22,6 @@
 //! Global coroutine scheduler
 
 use std::any::Any;
-use std::boxed::FnBox;
 use std::io::{self, Write};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +33,7 @@ use std::panic;
 use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt, Sender};
 use mio::util::Slab;
 
-use coroutine::{Handle, Coroutine, State};
+use coroutine::{Handle, Coroutine};
 use options::Options;
 use runtime::processor::{Processor, ProcMessage};
 use join_handle::{self, JoinHandleReceiver};
@@ -158,13 +157,14 @@ impl Handler for Scheduler {
 /// Coroutine scheduler
 pub struct Scheduler {
     expected_worker_count: usize,
-    default_stack_size: Option<usize>,
 
     // Mio event loop handler
     event_loop_sender: Option<Sender<EventLoopMessage>>,
     work_count: Arc<AtomicUsize>,
 
     slab: Slab<Option<(Handle, ReadyCallback<'static>)>>,
+
+    default_spawn_options: Options,
 }
 
 unsafe impl Send for Scheduler {}
@@ -175,12 +175,13 @@ impl Scheduler {
     pub fn new() -> Scheduler {
         Scheduler {
             expected_worker_count: 1,
-            default_stack_size: None,
 
             event_loop_sender: None,
             work_count: Arc::new(AtomicUsize::new(0)),
 
             slab: Slab::new_starting_at(Token(1), 102400),
+
+            default_spawn_options: Options::default(),
         }
     }
 
@@ -193,7 +194,7 @@ impl Scheduler {
 
     /// Set the default stack size
     pub fn default_stack_size(mut self, default_stack_size: usize) -> Scheduler {
-        self.default_stack_size = Some(default_stack_size);
+        self.default_spawn_options.stack_size(default_stack_size);
         self
     }
 
@@ -208,8 +209,8 @@ impl Scheduler {
         self.work_count.load(Ordering::SeqCst)
     }
 
-    #[inline]
     #[doc(hidden)]
+    #[inline]
     pub unsafe fn work_counter(&self) -> Arc<AtomicUsize> {
         self.work_count.clone()
     }
@@ -250,7 +251,8 @@ impl Scheduler {
 
         // Resume it right here
         trace!("Coroutine `{}` runs without processor", coro.debug_name());
-        Coroutine::resume(State::Running, &mut *coro);
+        // Coroutine::resume(State::Running, &mut *coro);
+        coro.resume(0);
     }
 
     /// Spawn a new coroutine with default options
@@ -258,17 +260,8 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let (tx, rx) = join_handle::handle_pair();
-        let wrapper = move || {
-            let ret = unsafe { ::try(move || f()) };
-
-            // No matter whether it is panicked or not, the result will be sent to the channel
-            let _ = tx.push(ret);
-        };
-        let mut processor = Processor::current().unwrap();
-        processor.spawn(wrapper);
-
-        JoinHandle { result: rx }
+        let opt = Scheduler::instance().unwrap().default_spawn_options.clone();
+        Scheduler::spawn_opts(f, opt)
     }
 
     /// Spawn a new coroutine with options
@@ -291,12 +284,12 @@ impl Scheduler {
 
     /// Run the scheduler
     pub fn run<F, T>(&mut self, f: F) -> Result<T, Box<Any + Send>>
-        where F: FnOnce() -> T + Send,
-              T: Send
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
     {
         let default_handler = panic::take_handler();
-        panic::set_handler(move|panic_info| {
-            if let Some(p) = Processor::current() {
+        panic::set_handler(move |panic_info| {
+            if let Some(mut p) = Processor::current() {
                 if let Some(c) = p.current() {
                     let mut stderr = io::stderr();
                     let _ = write!(stderr, "Coroutine `{}` running in ", c.debug_name());
@@ -309,7 +302,7 @@ impl Scheduler {
         let mut machines = Vec::with_capacity(self.expected_worker_count);
 
         for tid in 0..self.expected_worker_count {
-            machines.push(Processor::new(self, tid, self.default_stack_size));
+            machines.push(Processor::new(self, tid));
         }
 
         for x in 0..machines.len() {
@@ -330,13 +323,13 @@ impl Scheduler {
 
         let cloned_event_loop_sender = event_loop.channel();
         {
-            let result = &mut result;
+            let result = unsafe { &mut *(&mut result as *mut _) };
             let wrapper = move || {
                 let ret = unsafe { ::try(move || f()) };
 
                 *result = Some(ret);
 
-                trace!("Main coroutine is finished with result {}, going to shutdown",
+                trace!("Main Coroutine is finished with result {}, going to shutdown",
                        match result.as_ref().unwrap() {
                            &Ok(..) => "Ok(..)",
                            &Err(..) => "Err(..)",
@@ -344,9 +337,10 @@ impl Scheduler {
                 cloned_event_loop_sender.send(EventLoopMessage::Shutdown).unwrap();
             };
 
-            let f: Box<FnBox()> = Box::new(wrapper);
-            let mut main_coro = Coroutine::spawn_opts(unsafe { mem::transmute(f) },
-                                                      Options::new().name("<main>".to_owned()));
+            // let f: Box<FnBox()> = Box::new(wrapper);
+            let mut opt = self.default_spawn_options.clone();
+            opt.name("<main>".to_owned());
+            let mut main_coro = Coroutine::spawn_opts(wrapper, opt);
 
             main_coro.attach(self.work_count.clone());
 
@@ -367,6 +361,8 @@ impl Scheduler {
             let _ = m.thread_handle.join();
         }
 
+        trace!("All worker threads are shutdown, it's time to say good bye :)");
+
         // Restore panic handler
         panic::take_handler();
 
@@ -374,7 +370,6 @@ impl Scheduler {
     }
 
     /// Suspend the current coroutine or thread
-    #[inline]
     pub fn sched() {
         match Processor::current() {
             Some(p) => p.sched(),
@@ -383,10 +378,8 @@ impl Scheduler {
     }
 
     /// Block the current coroutine
-    #[inline]
-    pub fn block_with<'scope, U, F>(f: F) -> U
-        where F: FnOnce(&mut Processor, Handle) -> U + 'scope,
-              U: 'scope
+    pub fn block_with<'scope, F>(f: F)
+        where F: FnOnce(&mut Processor, Handle) + 'scope
     {
         Processor::current().map(|x| x.block_with(f)).unwrap()
     }
@@ -486,7 +479,7 @@ mod test {
             .run(|| {
                 let guard = Scheduler::spawn(|| 1);
 
-                assert_eq!(1, guard.join().unwrap());
+                assert_eq!(guard.join().unwrap(), 1);
             })
             .unwrap();
     }

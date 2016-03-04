@@ -41,6 +41,8 @@ use options::Options;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
+type BlockWithCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
+
 #[derive(Clone)]
 pub struct ProcMessageSender {
     inner: Sender<ProcMessage>,
@@ -65,9 +67,9 @@ pub struct Machine {
 }
 
 /// Control handle for the Processor
-pub struct ProcessorHandle<'a>(&'a mut Processor);
+pub struct ProcessorHandle(&'static mut Processor);
 
-impl<'a> ProcessorHandle<'a> {
+impl ProcessorHandle {
     #[inline]
     pub fn id(&self) -> usize {
         self.0.id()
@@ -75,34 +77,33 @@ impl<'a> ProcessorHandle<'a> {
 
     /// Obtains the currently running coroutine after setting it's state to Blocked.
     /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
-    pub fn block_with<'scope, U, F>(self, f: F) -> U
-        where F: FnOnce(&mut Processor, Handle) -> U + 'scope,
-              U: 'scope
+    pub fn block_with<'scope, F>(self, f: F)
+        where F: FnOnce(&mut Processor, Handle) + 'scope
     {
         let processor = self.0;
 
         debug_assert!(processor.current_coro.is_some(), "Coroutine is missing");
 
+        // Create a data carrier to carry a static function pointer and the Some(callback).
+        // The callback is finally executed in the Scheduler::resume() method.
+        // TODO: Please clean me up! The Some() is redundant, etc.
         let mut f = Some(f);
-        let mut r = None;
+        let mut carrier = Some((coroutine_blocked::<F> as usize, &mut f as *mut _ as usize));
 
-        {
-            let mut cb = |p: &mut Processor, coro: Handle| {
-                r = Some(f.take().unwrap()(p, coro));
-            };
-
-            // NOTE: Circumvents the following problem:
-            //   transmute called with differently sized types: &mut [closure ...] (could be 64 bits) to
-            //   &'static mut core::ops::FnMut(Box<coroutine::Coroutine>) + 'static (could be 128 bits) [E0512]
-            let cb_ref = &mut cb as &mut FnMut(&mut Processor, Handle);
-            let cb_ref_static: TakeCoroutineCallback<'static> = unsafe { mem::transmute(cb_ref) };
-
-            // Gets executed as soon as yield_with() returns in Processor::resume().
-            processor.take_coro_cb = Some(cb_ref_static);
-            processor.yield_with(State::Blocked);
+        if let Some(ref mut coro) = processor.current_coro {
+            trace!("Coroutine `{}` is going to be blocked", coro.debug_name());
+            coro.yield_with(State::Blocked, &mut carrier as *mut _ as usize);
         }
 
-        r.expect("Couldn't get result from the block_with callback")
+        // This function will be called on the Processor's Context as a bridge
+        fn coroutine_blocked<F>(data: usize, p: &mut Processor, coro: Handle)
+            where F: FnOnce(&mut Processor, Handle)
+        {
+            // Take out the callback function object from the Coroutine's stack
+            let f = unsafe { (&mut *(data as *mut Option<F>)).take().unwrap() };
+
+            f(p, coro);
+        }
     }
 
     /// Yield the current coroutine
@@ -111,8 +112,8 @@ impl<'a> ProcessorHandle<'a> {
         self.0.sched()
     }
 
-    #[inline]
     #[allow(unused)]
+    #[inline]
     pub fn handle(&self) -> ProcMessageSender {
         self.0.handle()
     }
@@ -128,35 +129,17 @@ impl<'a> ProcessorHandle<'a> {
     }
 
     #[inline]
-    pub fn spawn<F>(&mut self, f: F)
-        where F: FnOnce() + Send + 'static
-    {
-        let opts = match self.0.default_stack_size {
-            Some(sz) => Options::new().stack_size(sz),
-            None => Options::new(),
-        };
-
-        self.spawn_opts(f, opts)
+    pub fn current(&mut self) -> Option<&mut Handle> {
+        self.0.current_coroutine()
     }
 
-    #[inline]
     pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
         where F: FnOnce() + Send + 'static
     {
-        let mut new_coro = Coroutine::spawn_opts(Box::new(f), opts);
+        let mut new_coro = Coroutine::spawn_opts(f, opts);
         new_coro.set_preferred_processor(Some(self.0.weak_self().clone()));
         new_coro.attach(unsafe { self.0.scheduler().work_counter() });
         self.ready(new_coro);
-    }
-
-    #[inline]
-    pub fn begin_unwind(&mut self, raw_coro: &mut Coroutine) {
-        unsafe { self.0.toggle_unwinding(raw_coro) }
-    }
-
-    #[inline]
-    pub fn current(&self) -> Option<&Handle> {
-        self.0.current_coro.as_ref()
     }
 }
 
@@ -182,9 +165,6 @@ pub struct ProcessorInner {
     weak_self: WeakProcessor,
     scheduler: *mut Scheduler,
 
-    // Stores the context of the Processor::schedule() loop.
-    main_coro: Coroutine,
-
     // NOTE: ONLY to be used by resume() and block_with().
     current_coro: Option<Handle>,
 
@@ -192,16 +172,12 @@ pub struct ProcessorInner {
     queue_worker: Worker<Handle>,
     queue_stealer: Stealer<Handle>,
     neighbor_stealers: Vec<Stealer<Handle>>, // TODO: make it a Arc<Vec<>>
-    take_coro_cb: Option<TakeCoroutineCallback<'static>>,
 
     chan_sender: Sender<ProcMessage>,
     chan_receiver: Receiver<ProcMessage>,
 
     thread_handle: Option<Thread>,
     should_wake_up: AtomicBool,
-
-    // Default stack size for spawning coroutines
-    default_stack_size: Option<usize>,
 }
 
 impl ProcessorInner {
@@ -212,14 +188,8 @@ impl ProcessorInner {
     }
 }
 
-impl Drop for ProcessorInner {
-    fn drop(&mut self) {
-        self.main_coro.set_state(State::Finished);
-    }
-}
-
 impl Processor {
-    pub fn new(sched: *mut Scheduler, processor_id: usize, default_stack_size: Option<usize>) -> Machine {
+    pub fn new(sched: *mut Scheduler, processor_id: usize) -> Machine {
         let (worker, stealer) = deque::new();
         let (tx, rx) = mpsc::channel();
 
@@ -230,26 +200,18 @@ impl Processor {
                 weak_self: unsafe { mem::zeroed() },
                 scheduler: sched,
 
-                main_coro: unsafe {
-                    let mut coro = Coroutine::empty_on_stack();
-                    coro.set_name(format!("<proc_#{}>", processor_id));
-                    coro
-                },
                 current_coro: None,
 
                 rng: rand::weak_rng(),
                 queue_worker: worker,
                 queue_stealer: stealer,
                 neighbor_stealers: Vec::new(),
-                take_coro_cb: None,
 
                 chan_sender: tx,
                 chan_receiver: rx,
 
                 thread_handle: None,
                 should_wake_up: AtomicBool::new(false),
-
-                default_stack_size: default_stack_size,
             }),
         };
 
@@ -271,8 +233,6 @@ impl Processor {
                                     });
 
                                     p.schedule();
-
-                                    trace!("Processor#{} is shutdown", processor_id);
                                 })
                                 .unwrap();
 
@@ -283,31 +243,40 @@ impl Processor {
         }
     }
 
+    #[inline]
     pub fn scheduler(&self) -> &Scheduler {
         unsafe { &*self.scheduler }
     }
 
     /// Get the thread local processor.
-    pub fn current<'a>() -> Option<ProcessorHandle<'a>> {
+    pub fn current() -> Option<ProcessorHandle> {
         Processor::instance().map(ProcessorHandle)
     }
 
-    fn instance<'a>() -> Option<&'a mut Processor> {
+    pub fn instance<'a>() -> Option<&'a mut Processor> {
         PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
     }
 
+    pub fn current_coroutine(&mut self) -> Option<&mut Handle> {
+        self.current_coro.as_mut()
+    }
+
+    #[inline]
     pub fn weak_self(&self) -> &WeakProcessor {
         &self.weak_self
     }
 
+    #[inline]
     pub fn id(&self) -> usize {
         self.id
     }
 
+    #[inline]
     pub fn stealer(&self) -> Stealer<Handle> {
         self.queue_stealer.clone()
     }
 
+    #[inline]
     pub fn handle(&self) -> ProcMessageSender {
         ProcMessageSender {
             inner: self.chan_sender.clone(),
@@ -317,7 +286,7 @@ impl Processor {
 
     /// Run the processor
     fn schedule(&mut self) {
-        self.main_coro.set_state(State::Running);
+        trace!("{:?} starts", self);
 
         'outerloop: loop {
             // 1. Run all tasks in local queue
@@ -334,6 +303,7 @@ impl Processor {
                         match msg {
                             ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                             ProcMessage::Shutdown => {
+                                trace!("{:?} got ProcMessage::Shutdown signal", self);
                                 break 'outerloop;
                             }
                             ProcMessage::Ready(mut coro) => {
@@ -383,49 +353,83 @@ impl Processor {
             }
         }
 
+        trace!("{:?} dropping all pending Coroutines in the channel", self);
         while let Ok(msg) = self.chan_receiver.try_recv() {
             match msg {
                 ProcMessage::Ready(coro) => {
+                    trace!("Coroutine `{}` is dropping in {:?}",
+                           coro.debug_name(),
+                           self);
                     drop(coro);
                 }
                 _ => {}
             }
         }
 
+        trace!("{:?} dropping all pending Coroutines in the work queue",
+               self);
         // Clean up
         while let Some(hdl) = self.queue_worker.pop() {
+            trace!("Coroutine `{}` is dropping in {:?}", hdl.debug_name(), self);
             drop(hdl);
         }
+
+        trace!("{:?} is shutdown", self);
     }
 
-    fn resume(&mut self, mut coro: Handle) {
-        debug_assert!(coro.state() != State::Finished,
-                      "Cannot resume a finished coroutine");
+    fn resume(&mut self, coro: Handle) {
+        debug_assert!(!coro.is_finished(), "Cannot resume a finished coroutine");
 
         trace!("Resuming Coroutine `{}` in {:?}", coro.debug_name(), self);
-        unsafe {
-            let current_coro: *mut Coroutine = &mut *coro;
-
+        let data = {
+            // let current_coro: *mut Coroutine = &mut *coro;
             self.current_coro = Some(coro);
-            // self.main_coro.yield_to(State::Suspended, &mut *current_coro);
-            self.raw_resume(&mut *current_coro);
-        }
-
-        let coro = self.current_coro.take().unwrap();
-        trace!("Coroutine `{}` is yielded with state: {:?}",
-               coro.debug_name(),
-               coro.state());
-
-        match coro.state() {
-            State::Suspended => {
-                self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
+            // (&mut *current_coro).resume()
+            if let Some(ref mut c) = self.current_coro {
+                c.resume(0)
+            } else {
+                0
             }
-            State::Blocked => {
-                self.take_coro_cb.take().unwrap()(self, coro);
+        };
+
+        match self.current_coro.take() {
+            Some(coro) => {
+                if !coro.is_finished() {
+                    trace!("Coroutine `{}` yield with state {:?}",
+                           coro.debug_name(),
+                           coro.state());
+
+                    match coro.state() {
+                        State::Suspended => {
+                            self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
+                        }
+                        State::Blocked => {
+                            if data != 0 {
+                                // Take out the data carrier
+                                let carrier = unsafe {
+                                    (&mut *(data as *mut Option<(usize, usize)>)).take().unwrap()
+                                };
+
+                                // Transmute the first item of the tuple back to the bridge function
+                                let function: fn(usize, &mut Processor, Handle) = unsafe {
+                                    mem::transmute(carrier.0)
+                                };
+
+                                // The function is a global generic function, so it is safe to call it even if
+                                // the Coroutine is dropped inside its body
+                                function(carrier.1, self, coro);
+                            }
+                        }
+                        s => {
+                            panic!("Coroutine yielded with invalid state {:?}", s);
+                        }
+                    }
+                } else {
+                    trace!("A Coroutine is finished and going to be dropped right now");
+                }
             }
-            State::Finished => {}
-            s => {
-                panic!("Coroutine yielded with invalid state {:?}", s);
+            None => {
+                panic!("The current Coroutine handle is taken out somewhere else");
             }
         }
     }
@@ -445,36 +449,21 @@ impl Processor {
 
     /// Yield the current running coroutine with specified result
     pub fn yield_with(&mut self, r: State) {
-        unsafe {
-            let main_coro: *mut Coroutine = &mut self.main_coro;
-            self.current_coro.as_mut().unwrap().yield_to(r, &mut *main_coro);
+        if let Some(coro) = self.current_coro.as_mut() {
+            coro.yield_with(r, 0);
         }
-    }
-
-    #[doc(hidden)]
-    pub unsafe fn raw_resume(&mut self, target: &mut Coroutine) {
-        self.main_coro.yield_to(State::Suspended, target)
-    }
-
-    #[doc(hidden)]
-    pub unsafe fn toggle_unwinding(&mut self, target: &mut Coroutine) {
-        self.main_coro.set_state(State::Suspended);
-        target.set_state(State::ForceUnwinding);
-        self.main_coro.raw_yield_to(target);
     }
 }
 
 impl Deref for Processor {
     type Target = ProcessorInner;
 
-    #[inline]
     fn deref(&self) -> &ProcessorInner {
         self.inner.deref()
     }
 }
 
 impl DerefMut for Processor {
-    #[inline]
     fn deref_mut(&mut self) -> &mut ProcessorInner {
         unsafe { &mut *(self.inner.deref() as *const ProcessorInner as *mut ProcessorInner) }
     }

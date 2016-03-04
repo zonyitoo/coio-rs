@@ -169,7 +169,8 @@ impl<T> SyncSender<T> {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                 if let Some(coro) = recv_wait_list.pop_front() {
-                    trace!("Coroutine `{}` is waken up in SyncSender receive_wait_list, {} remains",
+                    trace!("Coroutine `{}` is waken up in SyncSender receive_wait_list, {} \
+                            remains",
                            coro.debug_name(),
                            recv_wait_list.len());
                     Scheduler::ready(coro);
@@ -192,21 +193,25 @@ impl<T> SyncSender<T> {
                 }
             }
 
-            r = p.block_with(move|p, coro| {
-                let mut send_wait_list = self.send_wait_list.lock().unwrap();
-                let r = self.try_send(t);
+            r = Ok(());
+            {
+                let r_ptr = &mut r;
+                p.block_with(move |p, coro| {
+                    let mut send_wait_list = self.send_wait_list.lock().unwrap();
+                    let r = self.try_send(t);
 
-                match r {
-                    Err(TrySendError::Full(..)) => {
-                        send_wait_list.push_back(coro);
+                    match r {
+                        Err(TrySendError::Full(..)) => {
+                            send_wait_list.push_back(coro);
+                        }
+                        _ => {
+                            p.ready(coro);
+                        }
                     }
-                    _ => {
-                        p.ready(coro);
-                    }
-                }
 
-                r
-            });
+                    *r_ptr = r;
+                });
+            }
 
             match r {
                 Ok(..) => return Ok(()),
@@ -494,75 +499,82 @@ mod test {
 
     #[test]
     fn test_channel_passing_ring() {
-        Scheduler::new().with_workers(10).run(|| {
-            let mut handlers = Vec::new();
-            {
-                let (tx, mut rx) = channel();
+        Scheduler::new()
+            .with_workers(10)
+            .run(|| {
+                let mut handlers = Vec::new();
 
-                for _ in 0..10000 {
-                    let (ltx, lrx) = channel();
-                    let h = Scheduler::spawn(move|| {
-                        loop {
-                            let value = match rx.recv() {
-                                Ok(v) => v,
-                                Err(..) => break,
-                            };
-                            ltx.send(value).unwrap();
-                        }
-                    });
-                    handlers.push(h);
+                {
+                    let (tx, mut rx) = channel();
 
-                    rx = lrx;
+                    for _ in 0..10000 {
+                        let (ltx, lrx) = channel();
+                        let h = Scheduler::spawn(move || {
+                            loop {
+                                let value = match rx.recv() {
+                                    Ok(v) => v,
+                                    Err(..) => break,
+                                };
+                                ltx.send(value).unwrap();
+                            }
+                        });
+                        handlers.push(h);
+
+                        rx = lrx;
+                    }
+
+                    for i in 0..10 {
+                        tx.send(i).unwrap();
+                        let value = rx.recv().unwrap();
+                        assert_eq!(i, value);
+                    }
                 }
 
-                for i in 0..100 {
-                    tx.send(i).unwrap();
-                    let value = rx.recv().unwrap();
-                    assert_eq!(i, value);
+                for h in handlers {
+                    h.join().unwrap();
                 }
-            }
-
-            for h in handlers {
-                h.join().unwrap();
-            }
-        }).unwrap();
+            })
+            .unwrap();
     }
 
     #[test]
     fn test_sync_channel_passing_ring() {
-        Scheduler::new().with_workers(10).run(|| {
-            let mut handlers = Vec::new();
+        Scheduler::new()
+            .with_workers(10)
+            .run(|| {
+                let mut handlers = Vec::new();
 
-            {
-                let (tx, mut rx) = sync_channel(1);
+                {
+                    let (tx, mut rx) = sync_channel(1);
 
-                for _ in 0..1000 {
-                    let (ltx, lrx) = sync_channel(1);
-                    let h = Scheduler::spawn(move|| {
-                        loop {
-                            let value = match rx.recv() {
-                                Ok(v) => v,
-                                Err(..) => break,
-                            };
-                            ltx.send(value).unwrap();
-                        }
-                    });
-                    handlers.push(h);
+                    for _ in 0..1000 {
+                        let (ltx, lrx) = sync_channel(1);
+                        let h = Scheduler::spawn(move || {
+                            loop {
+                                let value = match rx.recv() {
+                                    Ok(v) => v,
+                                    Err(..) => break,
+                                };
+                                ltx.send(value).unwrap();
+                            }
+                        });
+                        handlers.push(h);
 
-                    rx = lrx;
+                        rx = lrx;
+                    }
+
+                    for i in 0..10 {
+                        tx.send(i).unwrap();
+                        let value = rx.recv().unwrap();
+                        assert_eq!(i, value);
+                    }
                 }
 
-                for i in 0..10 {
-                    tx.send(i).unwrap();
-                    let value = rx.recv().unwrap();
-                    assert_eq!(i, value);
+                for h in handlers {
+                    h.join().unwrap();
                 }
-            }
 
-            for h in handlers {
-                h.join().unwrap();
-            }
-
-        }).unwrap();
+            })
+            .unwrap();
     }
 }

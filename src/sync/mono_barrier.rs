@@ -115,36 +115,42 @@ impl CoroMonoBarrier {
     /// Try to wait for a signal().
     pub fn wait(&self) -> Result<(), CoroMonoBarrierError> {
         if let Some(p) = Processor::current() {
-            p.block_with(|p, mut coro| {
-                const EMPTY: *mut Coroutine = 0 as *mut Coroutine;
-                const READY: *mut Coroutine = 1 as *mut Coroutine;
-                const ORDER: Ordering = Ordering::SeqCst;
+            let mut result = Ok(());
+            {
+                let result_ptr = &mut result;
+                p.block_with(|p, mut coro| {
+                    const EMPTY: *mut Coroutine = 0 as *mut Coroutine;
+                    const READY: *mut Coroutine = 1 as *mut Coroutine;
+                    const ORDER: Ordering = Ordering::SeqCst;
 
-                loop {
-                    // Try to be optimistic and assume that the lock is READY
-                    if self.lock.compare_and_swap(READY, EMPTY, ORDER) == READY {
-                        // We stole READY and placed EMPTY ---> we're done
-                        p.ready(coro);
-                        return Ok(());
-                    } else {
-                        // The lock might be EMPTY instead ---> try to insert coro
-                        let new = &mut *coro as *mut Coroutine;
-                        let actual = self.lock.compare_and_swap(EMPTY, new, ORDER);
-
-                        if actual == EMPTY {
-                            // We replaced EMPTY with coro ---> signal() will ready() us
-                            mem::forget(coro);
-                            return Ok(());
-                        } else if actual != READY {
-                            // The lock is neither EMPTY nor READY
-                            // ---> it must be occupied
-                            // ---> abort
+                    loop {
+                        // Try to be optimistic and assume that the lock is READY
+                        if self.lock.compare_and_swap(READY, EMPTY, ORDER) == READY {
+                            // We stole READY and placed EMPTY ---> we're done
                             p.ready(coro);
-                            return Err(CoroMonoBarrierError::Occupied);
+                            return;
+                        } else {
+                            // The lock might be EMPTY instead ---> try to insert coro
+                            let new = &mut *coro as *mut Coroutine;
+                            let actual = self.lock.compare_and_swap(EMPTY, new, ORDER);
+
+                            if actual == EMPTY {
+                                // We replaced EMPTY with coro ---> signal() will ready() us
+                                mem::forget(coro);
+                                return;
+                            } else if actual != READY {
+                                // The lock is neither EMPTY nor READY
+                                // ---> it must be occupied
+                                // ---> abort
+                                p.ready(coro);
+                                *result_ptr = Err(CoroMonoBarrierError::Occupied);
+                                return;
+                            }
                         }
                     }
-                }
-            })
+                });
+            }
+            result
         } else {
             Err(CoroMonoBarrierError::MissingProcessor)
         }

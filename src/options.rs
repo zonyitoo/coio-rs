@@ -24,6 +24,7 @@
 use std::default::Default;
 
 /// Coroutine options
+#[derive(Debug, Clone)]
 pub struct Options {
     pub stack_size: usize,
     pub name: Option<String>,
@@ -40,12 +41,12 @@ impl Options {
         }
     }
 
-    pub fn stack_size(mut self, size: usize) -> Options {
+    pub fn stack_size(&mut self, size: usize) -> &mut Options {
         self.stack_size = size;
         self
     }
 
-    pub fn name(mut self, name: String) -> Options {
+    pub fn name(&mut self, name: String) -> &mut Options {
         self.name = Some(name);
         self
     }
