@@ -29,7 +29,7 @@ impl<T> JoinHandleSender<T> {
     pub fn push(self, result: Result<T, Box<Any + Send + 'static>>) {
         let data = unsafe { &mut *self.inner.data.get() };
         *data = Some(result);
-        self.inner.barrier.signal();
+        self.inner.barrier.notify();
     }
 }
 
@@ -50,7 +50,10 @@ impl<T> JoinHandleReceiver<T> {
 pub fn handle_pair<T>() -> (JoinHandleSender<T>, JoinHandleReceiver<T>) {
     let inner = Arc::new(JoinHandleInner::new());
     let sender = JoinHandleSender { inner: inner.clone() };
-    let receiver = JoinHandleReceiver { inner: inner, received: false };
+    let receiver = JoinHandleReceiver {
+        inner: inner,
+        received: false,
+    };
     (sender, receiver)
 }
 

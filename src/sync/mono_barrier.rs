@@ -74,8 +74,8 @@ impl MonoBarrier {
         }
     }
 
-    /// Try to signal the waiting executor
-    pub fn signal(&self) {
+    /// Try to notify the waiting executor
+    pub fn notify(&self) {
         let mut guard = self.lock.lock().unwrap();
 
         match mem::replace(&mut *guard, State::Empty) {
@@ -107,49 +107,52 @@ pub enum CoroMonoBarrierError {
     Occupied,
 }
 
+const CORO_EMPTY: *mut Coroutine = 0 as *mut Coroutine;
+const CORO_READY: *mut Coroutine = 1 as *mut Coroutine;
+
 impl CoroMonoBarrier {
     pub fn new() -> CoroMonoBarrier {
         CoroMonoBarrier { lock: AtomicPtr::new(ptr::null_mut()) }
     }
 
-    /// Try to wait for a signal().
+    /// Try to wait for a notify().
     pub fn wait(&self) -> Result<(), CoroMonoBarrierError> {
+        // wait() is the one potentially blocking a Coroutine.
+        // ---> Use Release ordering to flush possible previous writes to memory
+        //      in case the Coroutine gets resumed on another thread in notify().
+        const ORDERING: Ordering = Ordering::Release;
+
         if let Some(p) = Processor::current() {
             let mut result = Ok(());
-            {
-                let result_ptr = &mut result;
-                p.block_with(|p, mut coro| {
-                    const EMPTY: *mut Coroutine = 0 as *mut Coroutine;
-                    const READY: *mut Coroutine = 1 as *mut Coroutine;
-                    const ORDER: Ordering = Ordering::SeqCst;
 
-                    loop {
-                        // Try to be optimistic and assume that the lock is READY
-                        if self.lock.compare_and_swap(READY, EMPTY, ORDER) == READY {
-                            // We stole READY and placed EMPTY ---> we're done
+            p.block_with(|p, mut coro| {
+                loop {
+                    // Try to be optimistic and assume that the lock is CORO_READY
+                    if self.lock.compare_and_swap(CORO_READY, CORO_EMPTY, ORDERING) == CORO_READY {
+                        // We stole CORO_READY and placed CORO_EMPTY ---> we're done
+                        p.ready(coro);
+                        break;
+                    } else {
+                        // The lock might be CORO_EMPTY instead ---> try to insert coro
+                        let new = &mut *coro as *mut Coroutine;
+                        let actual = self.lock.compare_and_swap(CORO_EMPTY, new, ORDERING);
+
+                        if actual == CORO_EMPTY {
+                            // We replaced CORO_EMPTY with coro ---> notify() will CORO_READY us
+                            mem::forget(coro);
+                            break;
+                        } else if actual != CORO_READY {
+                            // The lock is neither CORO_EMPTY nor CORO_READY
+                            // ---> it must be occupied by another coro
+                            // ---> abort
+                            result = Err(CoroMonoBarrierError::Occupied);
                             p.ready(coro);
-                            return;
-                        } else {
-                            // The lock might be EMPTY instead ---> try to insert coro
-                            let new = &mut *coro as *mut Coroutine;
-                            let actual = self.lock.compare_and_swap(EMPTY, new, ORDER);
-
-                            if actual == EMPTY {
-                                // We replaced EMPTY with coro ---> signal() will ready() us
-                                mem::forget(coro);
-                                return;
-                            } else if actual != READY {
-                                // The lock is neither EMPTY nor READY
-                                // ---> it must be occupied
-                                // ---> abort
-                                p.ready(coro);
-                                *result_ptr = Err(CoroMonoBarrierError::Occupied);
-                                return;
-                            }
+                            break;
                         }
                     }
-                });
-            }
+                }
+            });
+
             result
         } else {
             Err(CoroMonoBarrierError::MissingProcessor)
@@ -158,32 +161,33 @@ impl CoroMonoBarrier {
 
     /// Try to notify a possibly waiting Coroutine. Otherwise mark the barrier as ready.
     pub fn notify(&self) {
-        const EMPTY: *mut Coroutine = 0 as *mut Coroutine;
-        const READY: *mut Coroutine = 1 as *mut Coroutine;
+        // notify() is the one potentially waking up a blocked Coroutine.
+        // ---> Use Acquire ordering to sync with possible writes to memory from before wait().
+        const ORDERING: Ordering = Ordering::Acquire;
 
-        // Try to be optimistic though and assume that lock is EMPTY and replace it with READY.
-        // NOTE: This variable will never be READY due to the retry condition below.
-        let mut current = EMPTY;
+        // Try to be optimistic though and assume that lock
+        // is CORO_EMPTY and replace it with CORO_READY.
+        // NOTE: This variable will never be CORO_READY due to the retry condition below.
+        let mut current = CORO_EMPTY;
 
         loop {
-            // The lock can either be EMPTY and thus should be marked READY,
-            // or non-EMPTY which means that we're trying to extract a Coroutine
-            // from the lock and thus should replace it with EMPTY.
-            let new = if current > READY {
-                EMPTY
+            // The lock can either be CORO_EMPTY and thus should be marked CORO_READY,
+            // or non-CORO_EMPTY which means that we're trying to extract a Coroutine
+            // from the lock and thus should replace it with CORO_EMPTY.
+            let new = if current > CORO_READY {
+                CORO_EMPTY
             } else {
-                READY
+                CORO_READY
             };
 
-            let actual = self.lock.compare_and_swap(current, new, Ordering::SeqCst);
+            let actual = self.lock.compare_and_swap(current, new, ORDERING);
 
             // Did we win?
             if actual == current {
                 // We won! Is it a Coroutine?
-                if actual > READY {
+                if actual > CORO_READY {
                     // It's a Coroutine! ---> make it ready()
-                    let coro: Handle = unsafe { Handle::from_raw(actual) };
-                    Scheduler::ready(coro);
+                    Scheduler::ready(unsafe { Handle::from_raw(actual) });
                 }
 
                 break;
@@ -197,13 +201,12 @@ impl CoroMonoBarrier {
 
 impl Drop for CoroMonoBarrier {
     fn drop(&mut self) {
-        const EMPTY: *mut Coroutine = 0 as *mut Coroutine;
-        const READY: *mut Coroutine = 1 as *mut Coroutine;
+        // If drop() is called the current thread must be the last one holding onto this instance.
+        // Thus we can simply swap out the `lock` value.
+        let lock = self.lock.swap(CORO_EMPTY, Ordering::AcqRel);
 
-        let lock = self.lock.swap(EMPTY, Ordering::SeqCst);
-        if lock > READY {
-            let coro = unsafe { Handle::from_raw(lock) };
-            drop(coro);
+        if lock > CORO_READY {
+            let _ = unsafe { Handle::from_raw(lock) };
         }
     }
 }
@@ -219,7 +222,7 @@ mod test {
     use scheduler::Scheduler;
 
     #[test]
-    fn test_mono_barrier_thread_signal() {
+    fn test_mono_barrier_thread_notify() {
         let barrier = Arc::new(MonoBarrier::new());
         let state = Arc::new(AtomicUsize::new(0));
 
@@ -229,7 +232,7 @@ mod test {
 
             thread::spawn(move || {
                 state.store(1, Ordering::SeqCst);
-                barrier.signal();
+                barrier.notify();
 
                 for _ in 0..100 {
                     if state.load(Ordering::SeqCst) == 2 {
@@ -253,7 +256,7 @@ mod test {
     }
 
     #[test]
-    fn test_mono_barrier_coroutine_signal() {
+    fn test_mono_barrier_coroutine_notify() {
         Scheduler::new()
             .run(|| {
                 let barrier = Arc::new(MonoBarrier::new());
@@ -265,7 +268,7 @@ mod test {
 
                     Scheduler::spawn(move || {
                         state.store(1, Ordering::SeqCst);
-                        barrier.signal();
+                        barrier.notify();
                     })
                 };
 
@@ -295,7 +298,7 @@ mod test {
                 };
 
                 state.store(1, Ordering::SeqCst);
-                barrier.signal();
+                barrier.notify();
 
                 h.join().unwrap();
             })
@@ -320,7 +323,7 @@ mod test {
                 };
 
                 state.store(1, Ordering::SeqCst);
-                barrier.signal();
+                barrier.notify();
 
                 h.join().unwrap();
             })

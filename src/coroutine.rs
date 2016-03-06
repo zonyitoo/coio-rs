@@ -21,6 +21,7 @@
 
 use std::boxed::FnBox;
 use std::fmt;
+use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::panic;
 use std::ptr;
@@ -217,17 +218,25 @@ unsafe impl Send for SendableCoroutinePtr {}
 pub struct Handle(*mut Coroutine);
 
 impl Handle {
-    /// Check if the Coroutine is already finished
     #[doc(hidden)]
     #[inline]
-    pub fn is_finished(&self) -> bool {
-        self.0 == ptr::null_mut()
+    pub fn into_raw(self) -> *mut Coroutine {
+        let coro = self.0;
+        mem::forget(self);
+        coro
     }
 
     #[doc(hidden)]
     #[inline]
     pub unsafe fn from_raw(coro: *mut Coroutine) -> Handle {
         Handle(coro)
+    }
+
+    /// Check if the Coroutine is already finished
+    #[doc(hidden)]
+    #[inline]
+    pub fn is_finished(&self) -> bool {
+        self.0 == ptr::null_mut()
     }
 
     /// Resume the Coroutine
