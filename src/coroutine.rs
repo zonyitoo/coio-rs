@@ -49,7 +49,7 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
             global_work_count: None,
             name: None,
             preferred_processor: None,
-            state: State::Initialized,
+            state: State::Suspended,
         };
 
         // Yield back after take out the callback function
@@ -115,10 +115,9 @@ struct InitData {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum State {
-    Initialized,
     Suspended,
     Running,
-    Blocked,
+    Parked,
 }
 
 /// Coroutine is nothing more than a context and a stack
@@ -141,6 +140,7 @@ impl Drop for Coroutine {
 }
 
 impl Coroutine {
+    #[inline]
     pub fn attach(&mut self, gwc: Arc<AtomicUsize>) {
         gwc.fetch_add(1, Ordering::SeqCst);
         self.global_work_count = Some(gwc);
@@ -177,10 +177,12 @@ impl Coroutine {
         Handle(coro_ref)
     }
 
+    #[inline]
     pub fn set_preferred_processor(&mut self, preferred_processor: Option<WeakProcessor>) {
         self.preferred_processor = preferred_processor;
     }
 
+    #[inline]
     pub fn preferred_processor(&self) -> Option<Processor> {
         self.preferred_processor.as_ref().and_then(|p| p.upgrade())
     }
@@ -191,8 +193,8 @@ impl Coroutine {
     }
 
     #[inline]
-    pub fn set_state(&mut self, state: State) {
-        self.state = state
+    pub fn name(&self) -> Option<&String> {
+        self.name.as_ref()
     }
 
     #[inline]
@@ -200,12 +202,12 @@ impl Coroutine {
         self.name = Some(name);
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_ref().map(|x| &x[..])
-    }
-
-    pub fn debug_name(&self) -> &str {
-        self.name().unwrap_or("<unnamed>")
+    #[inline]
+    pub fn debug_name(&self) -> String {
+        match self.name {
+            Some(ref name) => name.clone(),
+            None => format!("{:p}", &self),
+        }
     }
 }
 
@@ -252,7 +254,7 @@ impl Handle {
         debug_assert!(data != usize::MAX);
 
         let coro = unsafe { &mut *self.0 };
-        coro.set_state(state);
+        coro.state = state;
 
         let context = coro.context.take().unwrap();
         let Transfer { context, data } = context.resume(data);
@@ -273,12 +275,15 @@ unsafe impl Send for Handle {}
 
 impl Deref for Handle {
     type Target = Coroutine;
+
+    #[inline]
     fn deref(&self) -> &Coroutine {
         unsafe { &*self.0 }
     }
 }
 
 impl DerefMut for Handle {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Coroutine {
         unsafe { &mut *self.0 }
     }
@@ -290,7 +295,7 @@ impl Drop for Handle {
             return;
         }
 
-        trace!("Force-unwind Coroutine `{}`", self.debug_name());
+        trace!("Force-unwinding Coroutine `{}`", self.debug_name());
 
         let ctx = self.context.take().unwrap();
         ctx.resume_ontop(self.0 as *mut Coroutine as usize, coroutine_unwind);
@@ -300,9 +305,12 @@ impl Drop for Handle {
 impl fmt::Debug for Handle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.is_finished() {
-            write!(f, "Coroutine(.., Finished)")
+            write!(f, "Coroutine(None, Finished)")
         } else {
-            write!(f, "Coroutine({}, {:?})", self.debug_name(), self.state())
+            write!(f,
+                   "Coroutine(Some({}), {:?})",
+                   self.debug_name(),
+                   self.state())
         }
     }
 }
@@ -337,7 +345,7 @@ mod test {
 
                         let test = Test(shared_usize);
 
-                        Scheduler::block_with(|_, coro| drop(coro));
+                        Scheduler::park_with(|_, coro| drop(coro));
                         test.0.store(2, Ordering::SeqCst);
                     });
 

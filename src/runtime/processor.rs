@@ -75,9 +75,13 @@ impl ProcessorHandle {
         self.0.id()
     }
 
-    /// Obtains the currently running coroutine after setting it's state to Blocked.
-    /// NOTE: DO NOT call any Scheduler or Processor method within the passed callback, other than ready().
-    pub fn block_with<'scope, F>(self, f: F)
+    /// Obtains the currently running coroutine after setting it's state to Parked.
+    ///
+    /// # Safety
+    ///
+    /// - *DO NOT* call any Scheduler/Processor methods within the callback, other than ready().
+    /// - *DO NOT* drop the Coroutine within the callback.
+    pub fn park_with<'scope, F>(self, f: F)
         where F: FnOnce(&mut Processor, Handle) + 'scope
     {
         let processor = self.0;
@@ -88,20 +92,19 @@ impl ProcessorHandle {
         // The callback is finally executed in the Scheduler::resume() method.
         // TODO: Please clean me up! The Some() is redundant, etc.
         let mut f = Some(f);
-        let mut carrier = Some((coroutine_blocked::<F> as usize, &mut f as *mut _ as usize));
+        let mut carrier = Some((carrier_fn::<F> as usize, &mut f as *mut _ as usize));
 
         if let Some(ref mut coro) = processor.current_coro {
-            trace!("Coroutine `{}` is going to be blocked", coro.debug_name());
-            coro.yield_with(State::Blocked, &mut carrier as *mut _ as usize);
+            trace!("Coroutine `{}` is going to be parked", coro.debug_name());
+            coro.yield_with(State::Parked, &mut carrier as *mut _ as usize);
         }
 
         // This function will be called on the Processor's Context as a bridge
-        fn coroutine_blocked<F>(data: usize, p: &mut Processor, coro: Handle)
+        fn carrier_fn<F>(data: usize, p: &mut Processor, coro: Handle)
             where F: FnOnce(&mut Processor, Handle)
         {
             // Take out the callback function object from the Coroutine's stack
             let f = unsafe { (&mut *(data as *mut Option<F>)).take().unwrap() };
-
             f(p, coro);
         }
     }
@@ -112,7 +115,6 @@ impl ProcessorHandle {
         self.0.sched()
     }
 
-    #[allow(unused)]
     #[inline]
     pub fn handle(&self) -> ProcMessageSender {
         self.0.handle()
@@ -165,7 +167,7 @@ pub struct ProcessorInner {
     weak_self: WeakProcessor,
     scheduler: *mut Scheduler,
 
-    // NOTE: ONLY to be used by resume() and block_with().
+    // NOTE: ONLY to be used by resume() and park_with().
     current_coro: Option<Handle>,
 
     rng: rand::XorShiftRng,
@@ -321,7 +323,8 @@ impl Processor {
                 }
 
                 // 3. Randomly steal from neighbors as a last measure.
-                // TODO: To improve cache locality foreign lists should be split in half or so instead.
+                // TODO: To improve cache locality foreign lists
+                //       should be split in half or so instead.
                 let rand_idx = self.rng.gen::<usize>();
                 let total_stealers = self.neighbor_stealers.len();
 
@@ -403,7 +406,7 @@ impl Processor {
                         State::Suspended => {
                             self.chan_sender.send(ProcMessage::Ready(coro)).unwrap();
                         }
-                        State::Blocked => {
+                        State::Parked => {
                             if data != 0 {
                                 // Take out the data carrier
                                 let carrier = unsafe {
@@ -415,8 +418,8 @@ impl Processor {
                                     mem::transmute(carrier.0)
                                 };
 
-                                // The function is a global generic function, so it is safe to call it even if
-                                // the Coroutine is dropped inside its body
+                                // The function is a global generic function, so it is safe to
+                                // call it even if the Coroutine is dropped inside its body.
                                 function(carrier.1, self, coro);
                             }
                         }

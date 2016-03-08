@@ -198,12 +198,6 @@ impl Scheduler {
         self
     }
 
-    /// Get the global Scheduler
-    #[doc(hidden)]
-    pub fn instance() -> Option<&'static Scheduler> {
-        Processor::current().and_then(|p| unsafe { Some(mem::transmute(p.scheduler())) })
-    }
-
     #[inline]
     pub fn work_count(&self) -> usize {
         self.work_count.load(Ordering::SeqCst)
@@ -369,6 +363,11 @@ impl Scheduler {
         result.unwrap()
     }
 
+    /// Get the global Scheduler
+    pub fn instance() -> Option<&'static Scheduler> {
+        Processor::current().and_then(|p| unsafe { Some(mem::transmute(p.scheduler())) })
+    }
+
     /// Suspend the current coroutine or thread
     pub fn sched() {
         match Processor::current() {
@@ -378,14 +377,12 @@ impl Scheduler {
     }
 
     /// Block the current coroutine
-    pub fn block_with<'scope, F>(f: F)
+    pub fn park_with<'scope, F>(f: F)
         where F: FnOnce(&mut Processor, Handle) + 'scope
     {
-        Processor::current().map(|x| x.block_with(f)).unwrap()
+        Processor::current().map(|x| x.park_with(f)).unwrap()
     }
-}
 
-impl Scheduler {
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
     pub fn wait_event<'scope, E: Evented>(&self,
@@ -421,7 +418,7 @@ impl Scheduler {
             let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
             let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
 
-            Scheduler::block_with(|_, coro| {
+            Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
                 let msg = IoHandlerMessage::new(coro, reg, ready);
                 channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();
@@ -452,7 +449,7 @@ impl Scheduler {
             let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
             let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
 
-            Scheduler::block_with(|_, coro| {
+            Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
                 let msg = IoHandlerMessage::new(coro, reg, ready);
                 channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();

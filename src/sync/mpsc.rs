@@ -102,7 +102,7 @@ impl<T> Receiver<T> {
             }
 
             // 2. Yield
-            processor.block_with(|p, coro| {
+            processor.park_with(|p, coro| {
                 // 3. Lock the wait list
                 let mut wait_list = self.wait_list.lock().unwrap();
 
@@ -196,7 +196,7 @@ impl<T> SyncSender<T> {
             r = Ok(());
             {
                 let r_ptr = &mut r;
-                p.block_with(move |p, coro| {
+                p.park_with(move |p, coro| {
                     let mut send_wait_list = self.send_wait_list.lock().unwrap();
                     let r = self.try_send(t);
 
@@ -294,7 +294,7 @@ impl<T> SyncReceiver<T> {
                 Err(TryRecvError::Disconnected) => return Err(RecvError),
             }
 
-            processor.block_with(|p, coro| {
+            processor.park_with(|p, coro| {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
 
                 r = self.try_recv();

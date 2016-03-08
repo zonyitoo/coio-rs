@@ -58,7 +58,7 @@ impl<T> Mutex<T> {
         // 1. Try to lock with the atomic boolean
         while self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
             // 2. Otherwise yield
-            Scheduler::block_with(|_, coro| {
+            Scheduler::park_with(|_, coro| {
                 // 3. Get the lock of wait list
                 let mut wait_list = self.wait_list.lock().unwrap();
 
@@ -134,7 +134,8 @@ impl<'a, T: 'a> DerefMut for Guard<'a, T> {
 
 /// A type of error which can be returned whenever a lock is acquired.
 ///
-/// Currently this error does not act just like the [PoisonError](rust:#std::sync::PoisonError) does.
+/// Currently this error does not act just like the
+/// [PoisonError](rust:#std::sync::PoisonError) does.
 pub struct PoisonError<T> {
     guard: T,
 }

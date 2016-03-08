@@ -53,7 +53,7 @@ impl MonoBarrier {
                 &State::Empty => {
                     match Processor::current() {
                         Some(p) => {
-                            p.block_with(move |_, coro| {
+                            p.park_with(move |_, coro| {
                                 *guard = State::Coroutine(coro);
                                 drop(guard);
                             });
@@ -117,7 +117,7 @@ impl CoroMonoBarrier {
 
     /// Try to wait for a notify().
     pub fn wait(&self) -> Result<(), CoroMonoBarrierError> {
-        // wait() is the one potentially blocking a Coroutine.
+        // wait() is the one potentially parking a Coroutine.
         // ---> Use Release ordering to flush possible previous writes to memory
         //      in case the Coroutine gets resumed on another thread in notify().
         const ORDERING: Ordering = Ordering::Release;
@@ -125,7 +125,7 @@ impl CoroMonoBarrier {
         if let Some(p) = Processor::current() {
             let mut result = Ok(());
 
-            p.block_with(|p, mut coro| {
+            p.park_with(|p, mut coro| {
                 loop {
                     // Try to be optimistic and assume that the lock is CORO_READY
                     if self.lock.compare_and_swap(CORO_READY, CORO_EMPTY, ORDERING) == CORO_READY {
@@ -161,7 +161,7 @@ impl CoroMonoBarrier {
 
     /// Try to notify a possibly waiting Coroutine. Otherwise mark the barrier as ready.
     pub fn notify(&self) {
-        // notify() is the one potentially waking up a blocked Coroutine.
+        // notify() is the one potentially waking up a parked Coroutine.
         // ---> Use Acquire ordering to sync with possible writes to memory from before wait().
         const ORDERING: Ordering = Ordering::Acquire;
 
