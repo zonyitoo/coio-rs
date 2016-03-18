@@ -1,18 +1,15 @@
 /// One connection per thread
-
-extern crate clap;
 #[macro_use]
 extern crate log;
-extern crate env_logger;
 
-use std::thread;
+extern crate clap;
+
 use std::net::TcpListener;
+use std::thread;
 
 use clap::{Arg, App};
 
 fn main() {
-    env_logger::init().unwrap();
-
     let matches = App::new("threaded-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
@@ -38,7 +35,7 @@ fn main() {
             info!("Accept connection: {:?}", addr);
 
             thread::spawn(move || {
-                let mut buf = [0; 1024*16];
+                let mut buf = [0; 1024 * 16];
 
                 loop {
                     debug!("Trying to Read...");

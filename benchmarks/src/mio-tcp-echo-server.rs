@@ -1,21 +1,19 @@
 /// The code is borrowed from `mio/test/test_echo_server.rs`.
-
-extern crate mio;
 #[macro_use]
 extern crate log;
+
 extern crate bytes;
 extern crate clap;
-extern crate env_logger;
+extern crate mio;
 
 use std::io;
 use std::net::SocketAddr;
 
+use bytes::{ByteBuf, MutByteBuf};
+use clap::{Arg, App};
 use mio::*;
 use mio::tcp::*;
-use bytes::{ByteBuf, MutByteBuf};
 use mio::util::Slab;
-
-use clap::{Arg, App};
 
 const SERVER: Token = Token(0);
 
@@ -24,7 +22,7 @@ struct EchoConn {
     buf: Option<ByteBuf>,
     mut_buf: Option<MutByteBuf>,
     token: Option<Token>,
-    interest: EventSet
+    interest: EventSet,
 }
 
 impl EchoConn {
@@ -32,9 +30,9 @@ impl EchoConn {
         EchoConn {
             sock: sock,
             buf: None,
-            mut_buf: Some(ByteBuf::mut_with_capacity(1024*16)),
+            mut_buf: Some(ByteBuf::mut_with_capacity(1024 * 16)),
             token: None,
-            interest: EventSet::hup()
+            interest: EventSet::hup(),
         }
     }
 
@@ -59,7 +57,9 @@ impl EchoConn {
             Err(e) => debug!("not implemented; client err={:?}", e),
         }
 
-        event_loop.reregister(&self.sock, self.token.unwrap(), self.interest,
+        event_loop.reregister(&self.sock,
+                              self.token.unwrap(),
+                              self.interest,
                               PollOpt::edge() | PollOpt::oneshot())
     }
 
@@ -92,7 +92,9 @@ impl EchoConn {
 
         };
 
-        try!(event_loop.reregister(&self.sock, self.token.unwrap(), self.interest,
+        try!(event_loop.reregister(&self.sock,
+                                   self.token.unwrap(),
+                                   self.interest,
                                    PollOpt::level()));
         Ok(true)
     }
@@ -100,7 +102,7 @@ impl EchoConn {
 
 struct EchoServer {
     sock: TcpListener,
-    conns: Slab<EchoConn>
+    conns: Slab<EchoConn>,
 }
 
 impl EchoServer {
@@ -108,21 +110,25 @@ impl EchoServer {
         debug!("server accepting socket");
 
         let sock = self.sock.accept().unwrap().unwrap().0;
-        let conn = EchoConn::new(sock,);
-        let tok = self.conns.insert(conn)
-            .ok().expect("could not add connection to slab");
+        let conn = EchoConn::new(sock);
+        let tok = self.conns
+                      .insert(conn)
+                      .ok()
+                      .expect("could not add connection to slab");
 
         // Register the connection
         self.conns[tok].token = Some(tok);
-        event_loop.register(&self.conns[tok].sock, tok, EventSet::readable(),
+        event_loop.register(&self.conns[tok].sock,
+                            tok,
+                            EventSet::readable(),
                             PollOpt::level())
-            .ok().expect("could not register socket with event loop");
+                  .ok()
+                  .expect("could not register socket with event loop");
 
         Ok(())
     }
 
-    fn conn_readable(&mut self, event_loop: &mut EventLoop<Echo>,
-                     tok: Token) -> io::Result<()> {
+    fn conn_readable(&mut self, event_loop: &mut EventLoop<Echo>, tok: Token) -> io::Result<()> {
         debug!("server conn readable; tok={:?}", tok);
         if !try!(self.conn(tok).readable(event_loop)) {
             self.conns.remove(tok);
@@ -130,8 +136,7 @@ impl EchoServer {
         Ok(())
     }
 
-    fn conn_writable(&mut self, event_loop: &mut EventLoop<Echo>,
-                     tok: Token) -> io::Result<()> {
+    fn conn_writable(&mut self, event_loop: &mut EventLoop<Echo>, tok: Token) -> io::Result<()> {
         debug!("server conn writable; tok={:?}", tok);
         self.conn(tok).writable(event_loop)
     }
@@ -150,7 +155,7 @@ impl Echo {
         Echo {
             server: EchoServer {
                 sock: srv,
-                conns: Slab::new_starting_at(Token(2), 1024)
+                conns: Slab::new_starting_at(Token(2), 1024),
             },
         }
     }
@@ -160,28 +165,25 @@ impl Handler for Echo {
     type Timeout = usize;
     type Message = ();
 
-    fn ready(&mut self, event_loop: &mut EventLoop<Echo>, token: Token,
-             events: EventSet) {
+    fn ready(&mut self, event_loop: &mut EventLoop<Echo>, token: Token, events: EventSet) {
         debug!("ready {:?} {:?}", token, events);
         if events.is_readable() {
             match token {
                 SERVER => self.server.accept(event_loop).unwrap(),
-                i => self.server.conn_readable(event_loop, i).unwrap()
+                i => self.server.conn_readable(event_loop, i).unwrap(),
             }
         }
 
         if events.is_writable() {
             match token {
                 SERVER => panic!("received writable for token 0"),
-                _ => self.server.conn_writable(event_loop, token).unwrap()
+                _ => self.server.conn_writable(event_loop, token).unwrap(),
             };
         }
     }
 }
 
 fn main() {
-    env_logger::init().unwrap();
-
     let matches = App::new("mio-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
@@ -202,8 +204,8 @@ fn main() {
     let srv = TcpListener::bind(&addr).unwrap();
 
     info!("listen for connections");
-    event_loop.register(&srv, SERVER, EventSet::readable(),
-                        PollOpt::level()).unwrap();
+    event_loop.register(&srv, SERVER, EventSet::readable(), PollOpt::level())
+              .unwrap();
 
     // Start the event loop
     event_loop.run(&mut Echo::new(srv)).unwrap();

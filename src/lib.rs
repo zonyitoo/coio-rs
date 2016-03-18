@@ -34,10 +34,12 @@
 
 #[macro_use]
 extern crate log;
+
 extern crate context;
-extern crate mio;
 extern crate deque;
+extern crate mio;
 extern crate rand;
+extern crate slab;
 
 pub mod join_handle;
 pub mod net;
@@ -53,9 +55,6 @@ pub use scheduler::{Scheduler, JoinHandle};
 mod coroutine;
 mod runtime;
 
-use coroutine::{Handle, State};
-use runtime::Processor;
-use std::any::Any;
 use std::panic;
 use std::thread;
 use std::time::Duration;

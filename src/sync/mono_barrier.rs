@@ -1,5 +1,5 @@
+use std::fmt;
 use std::mem;
-use std::ptr;
 use std::sync::{Condvar, Mutex};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -45,12 +45,12 @@ impl MonoBarrier {
         };
 
         loop {
-            match &*guard {
-                &State::Ready => {
+            match *guard {
+                State::Ready => {
                     *guard = State::Empty;
                     return Ok(());
                 }
-                &State::Empty => {
+                State::Empty => {
                     match Processor::current() {
                         Some(p) => {
                             p.park_with(move |_, coro| {
@@ -94,6 +94,19 @@ impl MonoBarrier {
     }
 }
 
+impl fmt::Debug for MonoBarrier {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let guard = self.lock.lock().unwrap();
+
+        match *guard {
+            State::Empty => write!(f, "MonoBarrier(Empty)"),
+            State::Ready => write!(f, "MonoBarrier(Ready)"),
+            State::Thread => write!(f, "MonoBarrier(Thread)"),
+            State::Coroutine(ref coro) => write!(f, "MonoBarrier({:?})", coro),
+        }
+    }
+}
+
 pub struct CoroMonoBarrier {
     lock: AtomicPtr<Coroutine>,
 }
@@ -111,8 +124,9 @@ const CORO_EMPTY: *mut Coroutine = 0 as *mut Coroutine;
 const CORO_READY: *mut Coroutine = 1 as *mut Coroutine;
 
 impl CoroMonoBarrier {
+    #[inline]
     pub fn new() -> CoroMonoBarrier {
-        CoroMonoBarrier { lock: AtomicPtr::new(ptr::null_mut()) }
+        CoroMonoBarrier { lock: AtomicPtr::new(CORO_EMPTY) }
     }
 
     /// Try to wait for a notify().
@@ -125,33 +139,42 @@ impl CoroMonoBarrier {
         if let Some(p) = Processor::current() {
             let mut result = Ok(());
 
-            p.park_with(|p, mut coro| {
-                loop {
-                    // Try to be optimistic and assume that the lock is CORO_READY
-                    if self.lock.compare_and_swap(CORO_READY, CORO_EMPTY, ORDERING) == CORO_READY {
-                        // We stole CORO_READY and placed CORO_EMPTY ---> we're done
-                        p.ready(coro);
-                        break;
-                    } else {
-                        // The lock might be CORO_EMPTY instead ---> try to insert coro
+            // Try to be optimistic and assume that the lock is CORO_READY
+            let actual = self.lock.compare_and_swap(CORO_READY, CORO_EMPTY, ORDERING);
+
+            if actual == CORO_EMPTY {
+                p.park_with(|p, mut coro| {
+                    loop {
+                        // Try to be optimistic and assume that the lock is CORO_EMPTY.
                         let new = &mut *coro as *mut Coroutine;
                         let actual = self.lock.compare_and_swap(CORO_EMPTY, new, ORDERING);
 
                         if actual == CORO_EMPTY {
-                            // We replaced CORO_EMPTY with coro ---> notify() will CORO_READY us
+                            // We replaced CORO_EMPTY with coro ---> notify() will CORO_READY us.
                             mem::forget(coro);
                             break;
-                        } else if actual != CORO_READY {
-                            // The lock is neither CORO_EMPTY nor CORO_READY
-                            // ---> it must be occupied by another coro
-                            // ---> abort
-                            result = Err(CoroMonoBarrierError::Occupied);
+                        }
+
+                        // Alternatively assume that the lock is CORO_READY.
+                        let actual = self.lock.compare_and_swap(CORO_READY, CORO_EMPTY, ORDERING);
+
+                        // If the lock is CORO_EMPTY try again above, otherwise...
+                        if actual != CORO_EMPTY {
+                            // If the lock is neither CORO_EMPTY nor CORO_READY,
+                            // it has an invalid state ---> Error.
+                            if actual != CORO_READY {
+                                result = Err(CoroMonoBarrierError::Occupied);
+                            }
+
+                            // ---> In case of CORO_READY as well as an Error we are ready().
                             p.ready(coro);
                             break;
                         }
                     }
-                }
-            });
+                });
+            } else if actual != CORO_READY {
+                result = Err(CoroMonoBarrierError::Occupied);
+            }
 
             result
         } else {
@@ -207,6 +230,21 @@ impl Drop for CoroMonoBarrier {
 
         if lock > CORO_READY {
             let _ = unsafe { Handle::from_raw(lock) };
+        }
+    }
+}
+
+impl fmt::Debug for CoroMonoBarrier {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let lock = self.lock.load(Ordering::Relaxed);
+
+        if lock == CORO_EMPTY {
+            write!(f, "CoroMonoBarrier(Empty)")
+        } else if lock == CORO_EMPTY {
+            write!(f, "CoroMonoBarrier(Ready)")
+        } else {
+            // It is unsafe to access a Coroutine for a debug description if we do not own it.
+            write!(f, "CoroMonoBarrier({:p})", lock)
         }
     }
 }

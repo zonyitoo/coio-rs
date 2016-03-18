@@ -1,6 +1,6 @@
 [package]
 name = "coio"
-version = "0.1.5"
+version = "0.2.0"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>", "Leonard Hecker <leonard@hecker.io>"]
 description = "Coroutine scheduler with non-blocking I/O support"
 repository = "https://github.com/zonyitoo/coio-rs"
@@ -21,3 +21,4 @@ deque = "0.3"
 log = "0.3"
 mio = "0.5"
 rand = "0.3"
+slab = { git = "https://github.com/carllerche/slab.git", rev = "36c635b313619cec3d3595e53289b70f11aadff2" }

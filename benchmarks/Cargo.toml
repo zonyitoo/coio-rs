@@ -4,32 +4,23 @@ version = "0.1.0"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
 
 [dependencies]
-clap = "*"
-env_logger = "*"
-log = "*"
-hyper = "*"
-mio = "*"
-bytes = "*"
+bytes = "0.3"
+clap = "2.1"
+#hyper = "*"
+log = "0.3"
+mio = "0.5"
+
+#[[bin]]
+#name = "coio-http-echo-server"
 
 [[bin]]
 name = "coio-tcp-echo-server"
-
-[[bin]]
-name = "coio-http-echo-server"
 
 [[bin]]
 name = "mio-tcp-echo-server"
 
 [[bin]]
 name = "threaded-tcp-echo-server"
-
-#
-# [dependencies.mio]
-# git = "https://github.com/carllerche/mio.git"
-#
-# [dependencies.bytes]
-# git = "https://github.com/carllerche/bytes"
-# rev = "7edb577d0a"
 
 [dependencies.coio]
 path = "../"

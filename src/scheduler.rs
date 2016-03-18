@@ -22,26 +22,31 @@
 //! Global coroutine scheduler
 
 use std::any::Any;
+use std::fmt::Debug;
 use std::io::{self, Write};
 use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use std::thread;
 use std::panic;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
-use mio::{EventLoop, Evented, Handler, Token, EventSet, PollOpt, Sender};
-use mio::util::Slab;
+use mio::{Evented, EventLoop, EventSet, Handler, NotifyError, PollOpt, Sender, TimerError, Token};
+use slab::Slab;
 
 use coroutine::{Handle, Coroutine};
+use join_handle::{self, JoinHandleReceiver};
 use options::Options;
 use runtime::processor::{Processor, ProcMessage};
-use join_handle::{self, JoinHandleReceiver};
+use sync::mono_barrier::CoroMonoBarrier;
+
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
     result: JoinHandleReceiver<T>,
 }
+
+unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 impl<T> JoinHandle<T> {
     /// Join the coroutine until it finishes.
@@ -52,136 +57,130 @@ impl<T> JoinHandle<T> {
     }
 }
 
-unsafe impl<T: Send> Send for JoinHandle<T> {}
 
-type RegisterCallback<'a> = &'a mut (FnMut(&mut EventLoop<Scheduler>, Token) -> bool);
-type ReadyCallback<'a> = &'a mut (FnMut(&mut EventLoop<Scheduler>));
+type RegisterCallback<'a> = &'a mut FnMut(&mut EventLoop<Scheduler>, Token, ReadyStates) -> bool;
+type DeregisterCallback<'a> = &'a mut FnMut(&mut EventLoop<Scheduler>);
 
-pub struct IoHandlerMessage {
-    coroutine: Handle,
-    register: RegisterCallback<'static>,
-    ready: ReadyCallback<'static>,
+#[doc(hidden)]
+pub struct RegisterMessage {
+    cb: RegisterCallback<'static>,
+    coro: Handle,
 }
 
-impl IoHandlerMessage {
-    fn new<'scope>(coro: Handle,
-                   reg: RegisterCallback<'scope>,
-                   ready: ReadyCallback<'scope>)
-                   -> IoHandlerMessage {
-        let reg = unsafe {
-            mem::transmute::<RegisterCallback<'scope>, RegisterCallback<'static>>(reg)
-        };
-
-        let ready = unsafe {
-            mem::transmute::<ReadyCallback<'scope>, ReadyCallback<'static>>(ready)
-        };
-
-        IoHandlerMessage {
-            coroutine: coro,
-            register: reg,
-            ready: ready,
+impl RegisterMessage {
+    #[inline]
+    fn new<'a>(coro: Handle, cb: RegisterCallback<'a>) -> RegisterMessage {
+        RegisterMessage {
+            cb: unsafe { mem::transmute(cb) },
+            coro: coro,
         }
     }
 }
 
-unsafe impl Send for IoHandlerMessage {}
+#[doc(hidden)]
+pub struct DeregisterMessage {
+    cb: DeregisterCallback<'static>,
+    coro: Handle,
+    token: Token,
+}
 
-pub enum EventLoopMessage {
-    IoHandlerMessage(IoHandlerMessage),
+impl DeregisterMessage {
+    #[inline]
+    fn new<'a>(coro: Handle, cb: DeregisterCallback<'a>, token: Token) -> DeregisterMessage {
+        DeregisterMessage {
+            cb: unsafe { mem::transmute(cb) },
+            coro: coro,
+            token: token,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct TimerMessage {
+    coro: Handle,
+    delay: u64,
+    result: *mut Result<(), TimerError>,
+}
+
+impl TimerMessage {
+    #[inline]
+    fn new(coro: Handle, delay: u64, result: &mut Result<(), TimerError>) -> TimerMessage {
+        TimerMessage {
+            coro: coro,
+            delay: delay,
+            result: result,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub enum Message {
+    Register(RegisterMessage),
+    Deregister(DeregisterMessage),
+    Timer(TimerMessage),
     Shutdown,
 }
 
-impl Handler for Scheduler {
-    type Timeout = Token;
-    type Message = EventLoopMessage;
+unsafe impl Send for Message {}
 
-    fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
-        trace!("Got {:?} for {:?}", events, token);
 
-        if token == Token(0) {
-            error!("Received events from Token(0): {:?}", events);
-            return;
-        }
+#[doc(hidden)]
+#[repr(usize)]
+pub enum ReadyType {
+    Readable = 0,
+    Writable,
+    Error,
+    Hup,
+}
 
-        match self.slab.remove(token) {
-            Some(Some((coro, cb))) => {
-                cb(event_loop);
-                Scheduler::ready(coro);
-            }
-            None => {
-                warn!("No coroutine is waiting on token {:?}", token);
-            }
-            _ => unreachable!(),
-        }
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ReadyStates(Arc<[CoroMonoBarrier; 4]>);
+
+impl ReadyStates {
+    #[inline]
+    fn new() -> ReadyStates {
+        ReadyStates(Arc::new([CoroMonoBarrier::new(),
+                              CoroMonoBarrier::new(),
+                              CoroMonoBarrier::new(),
+                              CoroMonoBarrier::new()]))
     }
 
-    fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Token) {
-        trace!("Timer waked up {:?}", token);
-
-        if token == Token(0) {
-            error!("Received timeout event from Token(0)");
-            return;
-        }
-
-        match self.slab.remove(token) {
-            Some(Some((coro, cb))) => {
-                cb(event_loop);
-                Scheduler::ready(coro);
-            }
-            None => {
-                warn!("No coroutine is waiting on token {:?}", token);
-            }
-            _ => unreachable!(),
-        }
+    #[inline]
+    pub fn wait(&self, ready_type: ReadyType) {
+        self.0[ready_type as usize].wait().unwrap();
     }
 
-    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
-        match msg {
-            EventLoopMessage::IoHandlerMessage(msg) => {
-                self.slab
-                    .insert_with(move |token| {
-                        if (msg.register)(event_loop, token) {
-                            Some((msg.coroutine, msg.ready))
-                        } else {
-                            Scheduler::ready(msg.coroutine);
-                            None
-                        }
-                    })
-                    .unwrap();
-            }
-            EventLoopMessage::Shutdown => event_loop.shutdown(),
-        }
+    #[inline]
+    pub fn notify(&self, ready_type: ReadyType) {
+        self.0[ready_type as usize].notify();
     }
 }
+
 
 /// Coroutine scheduler
 pub struct Scheduler {
+    default_spawn_options: Options,
     expected_worker_count: usize,
 
     // Mio event loop handler
-    event_loop_sender: Option<Sender<EventLoopMessage>>,
+    event_loop_sender: Option<Sender<Message>>,
+    slab: Slab<ReadyStates, usize>,
     work_count: Arc<AtomicUsize>,
-
-    slab: Slab<Option<(Handle, ReadyCallback<'static>)>>,
-
-    default_spawn_options: Options,
 }
 
 unsafe impl Send for Scheduler {}
-unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
     /// Create a scheduler with default configurations
     pub fn new() -> Scheduler {
         Scheduler {
+            default_spawn_options: Options::default(),
             expected_worker_count: 1,
 
             event_loop_sender: None,
+            slab: Slab::new(1024),
             work_count: Arc::new(AtomicUsize::new(0)),
-
-            slab: Slab::new_starting_at(Token(1), 102400),
-
-            default_spawn_options: Options::default(),
         }
     }
 
@@ -207,73 +206,6 @@ impl Scheduler {
     #[inline]
     pub unsafe fn work_counter(&self) -> Arc<AtomicUsize> {
         self.work_count.clone()
-    }
-
-    /// A coroutine is ready for schedule
-    #[doc(hidden)]
-    pub fn ready(mut coro: Handle) {
-        trace!("Coroutine `{}` is ready to run", coro.debug_name());
-        let current = Processor::current();
-
-        if let Some(mut preferred) = coro.preferred_processor() {
-            trace!("Coroutine `{}` has preferred {:?}",
-                   coro.debug_name(),
-                   preferred);
-
-            if let Some(ref curr) = current {
-                if preferred.id() == curr.id() {
-                    // We're on the same thread ---> use the faster ready() method.
-                    trace!("Coroutine `{}` preferred to run in the current thread, push it into \
-                            local queue",
-                           coro.debug_name());
-                    return preferred.ready(coro);
-                }
-            }
-
-            trace!("Push Coroutine `{}` into the message queue of {:?}",
-                   coro.debug_name(),
-                   preferred);
-            let _ = preferred.handle().send(ProcMessage::Ready(coro));
-            return;
-        }
-
-        if let Some(mut current) = current {
-            trace!("Coroutine `{}` does not have preferred processor, push it into local queue",
-                   coro.debug_name());
-            return current.ready(coro);
-        }
-
-        // Resume it right here
-        trace!("Coroutine `{}` runs without processor", coro.debug_name());
-        // Coroutine::resume(State::Running, &mut *coro);
-        coro.resume(0);
-    }
-
-    /// Spawn a new coroutine with default options
-    pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
-    {
-        let opt = Scheduler::instance().unwrap().default_spawn_options.clone();
-        Scheduler::spawn_opts(f, opt)
-    }
-
-    /// Spawn a new coroutine with options
-    pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
-    {
-        let (tx, rx) = join_handle::handle_pair();
-        let wrapper = move || {
-            let ret = unsafe { ::try(move || f()) };
-
-            // No matter whether it is panicked or not, the result will be sent to the channel
-            let _ = tx.push(ret);
-        };
-        let mut processor = Processor::current().unwrap();
-        processor.spawn_opts(wrapper, opts);
-
-        JoinHandle { result: rx }
     }
 
     /// Run the scheduler
@@ -328,7 +260,7 @@ impl Scheduler {
                            &Ok(..) => "Ok(..)",
                            &Err(..) => "Err(..)",
                        });
-                cloned_event_loop_sender.send(EventLoopMessage::Shutdown).unwrap();
+                cloned_event_loop_sender.send(Message::Shutdown).unwrap();
             };
 
             // let f: Box<FnBox()> = Box::new(wrapper);
@@ -368,6 +300,38 @@ impl Scheduler {
         Processor::current().and_then(|p| unsafe { Some(mem::transmute(p.scheduler())) })
     }
 
+    /// Get the global Scheduler
+    pub fn instance_or_err() -> io::Result<&'static Scheduler> {
+        Self::instance().ok_or(io::Error::new(io::ErrorKind::Other, "Scheduler missing"))
+    }
+
+    /// Spawn a new coroutine with default options
+    pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
+    {
+        let opt = Scheduler::instance().unwrap().default_spawn_options.clone();
+        Scheduler::spawn_opts(f, opt)
+    }
+
+    /// Spawn a new coroutine with options
+    pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
+        where F: FnOnce() -> T + Send + 'static,
+              T: Send + 'static
+    {
+        let (tx, rx) = join_handle::handle_pair();
+        let wrapper = move || {
+            let ret = unsafe { ::try(move || f()) };
+
+            // No matter whether it is panicked or not, the result will be sent to the channel
+            let _ = tx.push(ret);
+        };
+        let mut processor = Processor::current().unwrap();
+        processor.spawn_opts(wrapper, opts);
+
+        JoinHandle { result: rx }
+    }
+
     /// Suspend the current coroutine or thread
     pub fn sched() {
         match Processor::current() {
@@ -383,76 +347,114 @@ impl Scheduler {
         Processor::current().map(|x| x.park_with(f)).unwrap()
     }
 
+    /// A coroutine is ready for schedule
+    #[doc(hidden)]
+    pub fn ready(mut coro: Handle) {
+        trace!("Coroutine `{}`: readying", coro.debug_name());
+
+        let current = Processor::current();
+
+        if let Some(mut preferred) = coro.preferred_processor() {
+            if let Some(ref curr) = current {
+                if preferred.id() == curr.id() {
+                    trace!("Coroutine `{}`: pushing into preferred queue",
+                           coro.debug_name());
+
+                    // We're on the same thread ---> use the faster ready() method.
+                    return preferred.ready(coro);
+                }
+            }
+
+            trace!("Coroutine `{}`: sending to preferred {:?}",
+                   coro.debug_name(),
+                   preferred);
+
+            let _ = preferred.handle().send(ProcMessage::Ready(coro));
+            return;
+        }
+
+        if let Some(mut current) = current {
+            trace!("Coroutine `{}`: pushing into current queue",
+                   coro.debug_name());
+            return current.ready(coro);
+        }
+
+        // Resume it right here
+        trace!("Coroutine `{}`: resuming without processor",
+               coro.debug_name());
+        coro.resume(0);
+    }
+
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
-    pub fn wait_event<'scope, E: Evented>(&self,
-                                          fd: &'scope E,
-                                          interest: EventSet)
-                                          -> io::Result<()> {
-        let mut ret1 = Ok(());
-        let mut ret2 = Ok(());
+    pub fn register<E>(&self, fd: &E, interest: EventSet) -> io::Result<(Token, ReadyStates)>
+        where E: Evented + Debug
+    {
+        trace!("Scheduler: requesting register of {:?} for {:?}",
+               fd,
+               interest);
+
+        let mut ret = Err(io::Error::from_raw_os_error(0));
 
         {
-            let mut reg = |evloop: &mut EventLoop<Scheduler>, token| {
-                let r = evloop.register(fd, token, interest, PollOpt::edge() | PollOpt::oneshot());
+            let mut cb = |evloop: &mut EventLoop<Scheduler>, token, ready_states| {
+                trace!("Scheduler: register of {:?} for {:?}", fd, interest);
+                let r = evloop.register(fd, token, interest, PollOpt::edge());
 
                 match r {
-                    Ok(..) => true,
-                    Err(..) => {
-                        ret1 = r;
+                    Ok(()) => {
+                        ret = Ok((token, ready_states));
+                        true
+                    }
+                    Err(err) => {
+                        ret = Err(err);
                         false
                     }
                 }
             };
-
-            let mut ready = |evloop: &mut EventLoop<Scheduler>| {
-                if cfg!(not(any(target_os = "macos",
-                                target_os = "ios",
-                                target_os = "freebsd",
-                                target_os = "dragonfly",
-                                target_os = "netbsd"))) {
-                    ret2 = evloop.deregister(fd);
-                }
-            };
-
-            let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
-            let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
+            let cb = &mut cb as RegisterCallback;
 
             Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                let msg = IoHandlerMessage::new(coro, reg, ready);
-                channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();
+                let mut msg = Message::Register(RegisterMessage::new(coro, cb));
+
+                loop {
+                    match channel.send(msg) {
+                        Err(NotifyError::Full(m)) => msg = m,
+                        _ => break,
+                    }
+                }
             });
         }
 
-        ret1.and(ret2)
+        ret
     }
 
-    /// Block the current coroutine until the specific time
     #[doc(hidden)]
-    pub fn sleep_ms(&self, delay: u64) -> io::Result<()> {
+    pub fn deregister<E>(&self, fd: &E, token: Token) -> io::Result<()>
+        where E: Evented + Debug
+    {
+        trace!("Scheduler: requesting deregister of {:?}", fd);
+
         let mut ret = Ok(());
 
         {
-            let mut reg = |evloop: &mut EventLoop<Scheduler>, token| {
-                match evloop.timeout_ms(token, delay) {
-                    Ok(..) => true,
-                    Err(..) => {
-                        ret = Err(io::Error::new(io::ErrorKind::Other, "failed to add timer"));
-                        false
-                    }
-                }
+            let mut cb = |evloop: &mut EventLoop<Scheduler>| {
+                trace!("Scheduler: deregister of {:?}", fd);
+                ret = evloop.deregister(fd);
             };
-
-            let mut ready = move |_: &mut EventLoop<Scheduler>| {};
-
-            let reg = &mut reg as &mut FnMut(&mut EventLoop<Scheduler>, Token) -> bool;
-            let ready = &mut ready as &mut FnMut(&mut EventLoop<Scheduler>);
+            let cb = &mut cb as DeregisterCallback;
 
             Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                let msg = IoHandlerMessage::new(coro, reg, ready);
-                channel.send(EventLoopMessage::IoHandlerMessage(msg)).unwrap();
+                let mut msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
+
+                loop {
+                    match channel.send(msg) {
+                        Err(NotifyError::Full(m)) => msg = m,
+                        _ => break,
+                    }
+                }
             });
         }
 
@@ -461,8 +463,118 @@ impl Scheduler {
 
     /// Block the current coroutine until the specific time
     #[doc(hidden)]
-    pub fn sleep(&self, delay: Duration) -> io::Result<()> {
+    pub fn sleep_ms(&self, delay: u64) -> Result<(), TimerError> {
+        trace!("Scheduler: requesting sleep for {}ms", delay);
+
+        let mut ret = Ok(());
+
+        {
+            Scheduler::park_with(|_, coro| {
+                let channel = self.event_loop_sender.as_ref().unwrap();
+                let mut msg = Message::Timer(TimerMessage::new(coro, delay, &mut ret));
+
+                loop {
+                    match channel.send(msg) {
+                        Err(NotifyError::Full(m)) => msg = m,
+                        _ => break,
+                    }
+                }
+            });
+        }
+
+        ret
+    }
+
+    /// Block the current coroutine until the specific time
+    #[doc(hidden)]
+    pub fn sleep(&self, delay: Duration) -> Result<(), TimerError> {
         self.sleep_ms(delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000)
+    }
+}
+
+impl Handler for Scheduler {
+    type Timeout = Token;
+    type Message = Message;
+
+    fn ready(&mut self, _event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
+        trace!("Handler: got {:?} for {:?}", events, token);
+
+        let ready_states = self.slab.get(token.as_usize()).expect("Token must be registered");
+
+        if events.is_readable() {
+            ready_states.notify(ReadyType::Readable);
+        }
+
+        if events.is_writable() {
+            ready_states.notify(ReadyType::Writable);
+        }
+
+        if events.is_error() {
+            ready_states.notify(ReadyType::Error);
+        }
+
+        if events.is_hup() {
+            ready_states.notify(ReadyType::Hup);
+        }
+    }
+
+    fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, token: Token) {
+        let coro = unsafe { Handle::from_raw(mem::transmute(token)) };
+        trace!("Handler: timout for {:?}", coro);
+        Scheduler::ready(coro);
+    }
+
+    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
+        match msg {
+            Message::Register(msg) => {
+                trace!("Handler: registering for {:?}", msg.coro);
+
+                if self.slab.remaining() == 0 {
+                    // doubles the size of the slab each time
+                    let grow = self.slab.count();
+                    self.slab.grow(grow);
+                }
+
+                self.slab.insert_with_opt(move |token| {
+                    let token = unsafe { mem::transmute(token) };
+                    let ready_states = ReadyStates::new();
+
+                    let ret = if (msg.cb)(event_loop, token, ready_states.clone()) {
+                        Some(ready_states)
+                    } else {
+                        None
+                    };
+
+                    Scheduler::ready(msg.coro);
+
+                    ret
+                });
+            }
+            Message::Deregister(msg) => {
+                trace!("Handler: deregistering for {:?}", msg.coro);
+
+                let _ = self.slab.remove(unsafe { mem::transmute(msg.token) });
+
+                (msg.cb)(event_loop);
+                Scheduler::ready(msg.coro);
+            }
+            Message::Timer(msg) => {
+                trace!("Handler: adding timer for {:?}", msg.coro);
+
+                let coro_ptr = Handle::into_raw(msg.coro);
+                let token = unsafe { mem::transmute(coro_ptr) };
+                let result = unsafe { &mut *msg.result };
+
+                if let Err(err) = event_loop.timeout_ms(token, msg.delay) {
+                    *result = Err(err);
+                    Scheduler::ready(unsafe { Handle::from_raw(coro_ptr) });
+                }
+            }
+            Message::Shutdown => {
+                trace!("Handler: shutting down");
+                event_loop.shutdown();
+            }
+        }
     }
 }
 

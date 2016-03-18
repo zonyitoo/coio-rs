@@ -95,7 +95,7 @@ impl ProcessorHandle {
         let mut carrier = Some((carrier_fn::<F> as usize, &mut f as *mut _ as usize));
 
         if let Some(ref mut coro) = processor.current_coro {
-            trace!("Coroutine `{}` is going to be parked", coro.debug_name());
+            trace!("Coroutine `{}`: parking", coro.debug_name());
             coro.yield_with(State::Parked, &mut carrier as *mut _ as usize);
         }
 
@@ -288,7 +288,7 @@ impl Processor {
 
     /// Run the processor
     fn schedule(&mut self) {
-        trace!("{:?} starts", self);
+        trace!("{:?}: starts", self);
 
         'outerloop: loop {
             // 1. Run all tasks in local queue
@@ -305,7 +305,7 @@ impl Processor {
                         match msg {
                             ProcMessage::NewNeighbor(nei) => self.neighbor_stealers.push(nei),
                             ProcMessage::Shutdown => {
-                                trace!("{:?} got ProcMessage::Shutdown signal", self);
+                                trace!("{:?}: got shutdown signal", self);
                                 break 'outerloop;
                             }
                             ProcMessage::Ready(mut coro) => {
@@ -332,10 +332,7 @@ impl Processor {
                     let idx = (rand_idx + idx) % total_stealers;
 
                     if let Stolen::Data(hdl) = self.neighbor_stealers[idx].steal() {
-                        trace!("{:?} steals Coroutine `{}` from neighbor[{}]",
-                               self,
-                               hdl.debug_name(),
-                               idx);
+                        trace!("{:?}: stole Coroutine `{}`", self, hdl.debug_name());
                         self.resume(hdl);
                         continue 'outerloop;
                     }
@@ -356,34 +353,31 @@ impl Processor {
             }
         }
 
-        trace!("{:?} dropping all pending Coroutines in the channel", self);
+        trace!("{:?}: dropping coroutines in channel", self);
         while let Ok(msg) = self.chan_receiver.try_recv() {
             match msg {
                 ProcMessage::Ready(coro) => {
-                    trace!("Coroutine `{}` is dropping in {:?}",
-                           coro.debug_name(),
-                           self);
+                    trace!("{:?}: received Coroutine `{}`", self, coro.debug_name());
                     drop(coro);
                 }
                 _ => {}
             }
         }
 
-        trace!("{:?} dropping all pending Coroutines in the work queue",
-               self);
+        trace!("{:?}: dropping coroutines in work queue", self);
         // Clean up
         while let Some(hdl) = self.queue_worker.pop() {
-            trace!("Coroutine `{}` is dropping in {:?}", hdl.debug_name(), self);
+            trace!("{:?}: received Coroutine `{}`", self, hdl.debug_name());
             drop(hdl);
         }
 
-        trace!("{:?} is shutdown", self);
+        trace!("{:?}: is shutdown", self);
     }
 
     fn resume(&mut self, coro: Handle) {
         debug_assert!(!coro.is_finished(), "Cannot resume a finished coroutine");
 
-        trace!("Resuming Coroutine `{}` in {:?}", coro.debug_name(), self);
+        trace!("{:?}: resuming Coroutine `{}`", self, coro.debug_name());
         let data = {
             // let current_coro: *mut Coroutine = &mut *coro;
             self.current_coro = Some(coro);
@@ -398,7 +392,7 @@ impl Processor {
         match self.current_coro.take() {
             Some(coro) => {
                 if !coro.is_finished() {
-                    trace!("Coroutine `{}` yield with state {:?}",
+                    trace!("Coroutine `{}`: yielded with {:?}",
                            coro.debug_name(),
                            coro.state());
 
@@ -428,11 +422,11 @@ impl Processor {
                         }
                     }
                 } else {
-                    trace!("A Coroutine is finished and going to be dropped right now");
+                    trace!("Coroutine `{}`: dropping", coro.debug_name());
                 }
             }
             None => {
-                panic!("The current Coroutine handle is taken out somewhere else");
+                panic!("Current Coroutine not found");
             }
         }
     }

@@ -1,12 +1,10 @@
 extern crate coio;
+extern crate env_logger;
 
 use std::io::{Read, Write};
 
 use coio::Scheduler;
 use coio::net::{TcpListener, TcpStream, UdpSocket};
-
-#[cfg(unix)]
-use coio::net::{UnixStream, UnixListener};
 
 #[test]
 fn test_tcp_echo() {
@@ -39,7 +37,6 @@ fn test_tcp_echo() {
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
-
                 assert_eq!(&buf[..len], b"abcdefg");
             });
 
@@ -51,26 +48,28 @@ fn test_tcp_echo() {
 
 #[test]
 fn test_udp_echo() {
+    env_logger::init().unwrap();
+
     Scheduler::new()
         .run(move || {
             const TEST_SLICE: &'static [u8] = b"abcdefg";
+
             let acceptor = UdpSocket::bind("127.0.0.1:0").unwrap();
             let acceptor_addr = acceptor.local_addr().unwrap();
+
+            let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
             // Listener
             let listen_fut = Scheduler::spawn(move || {
                 let mut buf = [0u8; 1024];
                 let (len, addr) = acceptor.recv_from(&mut buf).unwrap();
-                acceptor.send_to(&buf[..len], addr).unwrap();
+                acceptor.send_to(&buf[..len], &addr).unwrap();
             });
 
             let sender_fut = Scheduler::spawn(move || {
-                let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-
                 let mut buf = [0u8; 1024];
-                sender.send_to(TEST_SLICE, acceptor_addr).unwrap();
+                sender.send_to(TEST_SLICE, &acceptor_addr).unwrap();
                 let (len, _) = sender.recv_from(&mut buf).unwrap();
-
                 assert_eq!(&buf[..len], TEST_SLICE);
             });
 
@@ -83,14 +82,15 @@ fn test_udp_echo() {
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_echo() {
+    use coio::net::{UnixStream, UnixListener};
     use std::fs;
 
     Scheduler::new()
         .run(move || {
             const FILE_PATH_STR: &'static str = "/tmp/coio-unix-socket-test.sock";
 
-            let _ = fs::remove_file(FILE_PATH_STR);
-            let acceptor = UnixListener::bind(FILE_PATH_STR).unwrap();
+            let _ = fs::remove_file(&FILE_PATH_STR);
+            let acceptor = UnixListener::bind(&FILE_PATH_STR).unwrap();
 
             // Listener
             let listen_fut = Scheduler::spawn(move || {
@@ -104,7 +104,7 @@ fn test_unix_socket_echo() {
             });
 
             let sender_fut = Scheduler::spawn(move || {
-                let mut stream = UnixStream::connect(FILE_PATH_STR).unwrap();
+                let mut stream = UnixStream::connect(&FILE_PATH_STR).unwrap();
                 stream.write_all(b"abcdefg")
                       .and_then(|_| stream.flush())
                       .unwrap();

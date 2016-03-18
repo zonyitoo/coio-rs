@@ -21,122 +21,110 @@
 
 //! UDP
 
-use std::ops::{Deref, DerefMut};
 use std::io;
-use std::net::{ToSocketAddrs, SocketAddr};
+use std::net::{SocketAddr, ToSocketAddrs};
 
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, RawFd};
 
 use mio::EventSet;
+use mio::udp::UdpSocket as MioUdpSocket;
 
-use scheduler::Scheduler;
+use scheduler::ReadyType;
+use super::{each_addr, GenericEvented, SyncGuard};
 
-pub struct UdpSocket(::mio::udp::UdpSocket);
+macro_rules! create_udp_socket {
+    ($inner:expr) => (UdpSocket::new($inner, EventSet::readable() | EventSet::writable()));
+}
+
+pub type UdpSocket = GenericEvented<MioUdpSocket>;
 
 impl UdpSocket {
     /// Returns a new, unbound, non-blocking, IPv4 UDP socket
+    #[inline]
     pub fn v4() -> io::Result<UdpSocket> {
-        Ok(UdpSocket(try!(::mio::udp::UdpSocket::v4())))
+        let inner = try!(MioUdpSocket::v4());
+        create_udp_socket!(inner)
     }
 
     /// Returns a new, unbound, non-blocking, IPv6 UDP socket
+    #[inline]
     pub fn v6() -> io::Result<UdpSocket> {
-        Ok(UdpSocket(try!(::mio::udp::UdpSocket::v6())))
+        let inner = try!(MioUdpSocket::v6());
+        create_udp_socket!(inner)
     }
 
     pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
-        super::each_addr(addr, |a| ::mio::udp::UdpSocket::bound(&a)).map(UdpSocket)
+        each_addr(addr, |addr| {
+            let sock = try!(match *addr {
+                SocketAddr::V4(..) => Self::v4(),
+                SocketAddr::V6(..) => Self::v6(),
+            });
+
+            try!(sock.bind(addr));
+
+            Ok(sock)
+        })
     }
 
     pub fn try_clone(&self) -> io::Result<UdpSocket> {
-        Ok(UdpSocket(try!(self.0.try_clone())))
+        let inner = try!(self.inner.try_clone());
+        create_udp_socket!(inner)
     }
 
-    pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
-        let mut last_err = Ok(0);
-        for addr in try!(target.to_socket_addrs()) {
-            match self.0.send_to(buf, &addr) {
+    pub fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.inner.send_to(buf, target) {
                 Ok(None) => {
-                    debug!("UdpSocket send_to WOULDBLOCK");
-
-                    loop {
-                        try!(Scheduler::instance()
-                                 .unwrap()
-                                 .wait_event(&self.0, EventSet::writable()));
-
-                        match self.0.send_to(buf, &addr) {
-                            Ok(None) => {
-                                warn!("UdpSocket send_to WOULDBLOCK");
-                            }
-                            Ok(Some(len)) => {
-                                return Ok(len);
-                            }
-                            Err(err) => {
-                                return Err(err);
-                            }
-                        }
-                    }
+                    trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
                 }
                 Ok(Some(len)) => {
+                    trace!("UdpSocket({:?}): send_to() => Ok({})", self.token, len);
                     return Ok(len);
                 }
-                Err(err) => last_err = Err(err),
+                Err(err) => {
+                    trace!("UdpSocket({:?}): send_to() => Err(..)", self.token);
+                    return Err(err);
+                }
             }
-        }
 
-        last_err
+            trace!("UdpSocket({:?}): wait(Writable)", self.token);
+            self.ready_states.wait(ReadyType::Writable);
+            sync_guard.disarm();
+        }
     }
 
     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        match try!(self.0.recv_from(buf)) {
-            None => {
-                debug!("UdpSocket recv_from WOULDBLOCK");
-            }
-            Some(ret) => {
-                return Ok(ret);
-            }
-        }
+        let mut sync_guard = SyncGuard::new();
 
         loop {
-            try!(Scheduler::instance().unwrap().wait_event(&self.0, EventSet::readable()));
-
-            match try!(self.0.recv_from(buf)) {
-                None => {
-                    warn!("UdpSocket recv_from WOULDBLOCK");
+            match self.inner.recv_from(buf) {
+                Ok(None) => {
+                    trace!("UdpSocket({:?}): recv_from() => WouldBlock", self.token);
                 }
-                Some(ret) => {
-                    return Ok(ret);
+                Ok(Some(t)) => {
+                    trace!("UdpSocket({:?}): recv_from() => Ok(..)", self.token);
+                    return Ok(t);
+                }
+                Err(err) => {
+                    trace!("UdpSocket({:?}): recv_from() => Err(..)", self.token);
+                    return Err(err);
                 }
             }
+
+            trace!("UdpSocket({:?}): wait(Readable)", self.token);
+            self.ready_states.wait(ReadyType::Readable);
+            sync_guard.disarm();
         }
-    }
-}
-
-impl Deref for UdpSocket {
-    type Target = ::mio::udp::UdpSocket;
-
-    fn deref(&self) -> &::mio::udp::UdpSocket {
-        &self.0
-    }
-}
-
-impl DerefMut for UdpSocket {
-    fn deref_mut(&mut self) -> &mut ::mio::udp::UdpSocket {
-        &mut self.0
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for UdpSocket {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
     }
 }
 
 #[cfg(unix)]
 impl FromRawFd for UdpSocket {
     unsafe fn from_raw_fd(fd: RawFd) -> UdpSocket {
-        UdpSocket(FromRawFd::from_raw_fd(fd))
+        let inner = FromRawFd::from_raw_fd(fd);
+        create_udp_socket!(inner).unwrap()
     }
 }

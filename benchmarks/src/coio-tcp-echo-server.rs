@@ -1,18 +1,14 @@
-extern crate clap;
 #[macro_use]
 extern crate log;
-extern crate env_logger;
 
+extern crate clap;
 extern crate coio;
 
 use clap::{Arg, App};
-
-use coio::Scheduler;
 use coio::net::tcp::TcpListener;
+use coio::Scheduler;
 
 fn main() {
-    env_logger::init().unwrap();
-
     let matches = App::new("coio-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
@@ -45,7 +41,7 @@ fn main() {
                 info!("Accept connection: {:?}", addr);
 
                 Scheduler::spawn(move || {
-                    let mut buf = [0; 1024*16];
+                    let mut buf = [0; 1024 * 16];
 
                     loop {
                         debug!("Trying to Read...");

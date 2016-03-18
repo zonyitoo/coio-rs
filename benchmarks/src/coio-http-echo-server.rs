@@ -1,24 +1,20 @@
-extern crate clap;
 #[macro_use]
 extern crate log;
-extern crate env_logger;
-extern crate hyper;
 
+extern crate clap;
 extern crate coio;
+extern crate hyper;
 
 use clap::{Arg, App};
 
-use hyper::http;
-use hyper::buffer::BufReader;
-use hyper::server::Response;
-use hyper::header::Headers;
-
-use coio::Scheduler;
 use coio::net::tcp::TcpListener;
+use coio::Scheduler;
+use hyper::buffer::BufReader;
+use hyper::header::Headers;
+use hyper::http;
+use hyper::server::Response;
 
 fn main() {
-    env_logger::init().unwrap();
-
     let matches = App::new("coio-http-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
@@ -56,8 +52,8 @@ fn main() {
                             Err(..) => {
                                 // error!("Failed to parse request: {:?}", err);
                                 break;
-                            },
-                            Ok(req) => req
+                            }
+                            Ok(req) => req,
                         };
 
                         let should_keep_alive = http::should_keep_alive(req.version, &req.headers);

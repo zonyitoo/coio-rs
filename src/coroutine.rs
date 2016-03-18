@@ -42,16 +42,16 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
         data_opt_ref.take().unwrap()
     };
 
+    let mut meta = Coroutine {
+        context: None,
+        global_work_count: None,
+        name: None,
+        preferred_processor: None,
+        state: State::Suspended,
+    };
+
     // This block will ensure the `meta` will be destroied before dropping the stack
     let ctx = {
-        let mut meta = Coroutine {
-            context: None,
-            global_work_count: None,
-            name: None,
-            preferred_processor: None,
-            state: State::Suspended,
-        };
-
         // Yield back after take out the callback function
         // Now the Coroutine is initialized
         let meta_ptr = &mut meta as *mut _ as usize;
@@ -64,17 +64,18 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
                 // Take out the callback and run it
                 callback();
 
-                trace!("Coroutine `{}` finished its callback, going to cleanup",
+                trace!("Coroutine `{}`: returned from callback",
                        meta_ref.debug_name());
             })
         };
 
-        trace!("Coroutine `{}` is going to drop its stack",
-               meta.debug_name());
+        trace!("Coroutine `{}`: finished", meta.debug_name());
 
         // If panicked inside, the meta.context stores the actual return Context
         meta.context.take().unwrap()
     };
+
+    trace!("Coroutine `{}`: dropping stack", meta.debug_name());
 
     // Drop the stack after it is finished
     let mut stack_opt = Some(stack);
@@ -295,7 +296,7 @@ impl Drop for Handle {
             return;
         }
 
-        trace!("Force-unwinding Coroutine `{}`", self.debug_name());
+        trace!("Coroutine `{}`: force unwinding", self.debug_name());
 
         let ctx = self.context.take().unwrap();
         ctx.resume_ontop(self.0 as *mut Coroutine as usize, coroutine_unwind);

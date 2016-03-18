@@ -5,7 +5,7 @@ use coio::Scheduler;
 
 fn main() {
     env_logger::init().unwrap();
-    
+
     Scheduler::new()
         .run(|| {
             for _ in 0..10 {
