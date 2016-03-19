@@ -102,6 +102,9 @@ impl<E: Evented + Debug + Read> Read for GenericEvented<E> {
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     trace!("GenericEvented({:?}): read() => WouldBlock", self.token);
                 }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): read() => NotConnected", self.token);
+                }
                 Err(err) => {
                     trace!("GenericEvented({:?}): read() => Err(..)", self.token);
                     return Err(err);
@@ -128,6 +131,9 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     trace!("GenericEvented({:?}): write() => WouldBlock", self.token);
                 }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): write() => NotConnected", self.token);
+                }
                 Err(err) => {
                     trace!("GenericEvented({:?}): write() => Err(..)", self.token);
                     return Err(err);
@@ -151,6 +157,9 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
                 }
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     trace!("GenericEvented({:?}): flush() => WouldBlock", self.token);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): flush() => NotConnected", self.token);
                 }
                 Err(err) => {
                     trace!("GenericEvented({:?}): flush() => Err(..)", self.token);
