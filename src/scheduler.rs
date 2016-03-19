@@ -26,18 +26,19 @@ use std::fmt::Debug;
 use std::io::{self, Write};
 use std::mem;
 use std::panic;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use mio::{Evented, EventLoop, EventSet, Handler, NotifyError, PollOpt, Sender, TimerError, Token};
 use slab::Slab;
+use linked_hash_map::LinkedHashMap;
 
 use coroutine::{Handle, Coroutine};
 use join_handle::{self, JoinHandleReceiver};
 use options::Options;
-use runtime::processor::{Processor, ProcMessage};
+use runtime::processor::{Processor, ProcMessage, ProcMessageSender};
 use sync::mono_barrier::CoroMonoBarrier;
 
 
@@ -157,7 +158,6 @@ impl ReadyStates {
     }
 }
 
-
 /// Coroutine scheduler
 pub struct Scheduler {
     default_spawn_options: Options,
@@ -167,6 +167,8 @@ pub struct Scheduler {
     event_loop_sender: Option<Sender<Message>>,
     slab: Slab<ReadyStates, usize>,
     work_count: Arc<AtomicUsize>,
+
+    parked_processors: Mutex<LinkedHashMap<usize, ProcMessageSender>>,
 }
 
 unsafe impl Send for Scheduler {}
@@ -181,6 +183,8 @@ impl Scheduler {
             event_loop_sender: None,
             slab: Slab::new(1024),
             work_count: Arc::new(AtomicUsize::new(0)),
+
+            parked_processors: Mutex::new(LinkedHashMap::new()),
         }
     }
 
@@ -354,6 +358,17 @@ impl Scheduler {
 
         let current = Processor::current();
 
+        // Try to wake up a parked processor
+        if let Some(ref processor) = current {
+            let mut parked = processor.scheduler().parked_processors.lock().unwrap();
+            if let Some((_, prochdl)) = parked.pop_front() {
+                trace!("Coroutine `{}`: pushing into a parked processor",
+                       coro.debug_name());
+                let _ = prochdl.send(ProcMessage::Ready(coro));
+                return;
+            }
+        }
+
         if let Some(mut preferred) = coro.preferred_processor() {
             if let Some(ref curr) = current {
                 if preferred.id() == curr.id() {
@@ -489,6 +504,18 @@ impl Scheduler {
     #[doc(hidden)]
     pub fn sleep(&self, delay: Duration) -> Result<(), TimerError> {
         self.sleep_ms(delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000)
+    }
+
+    #[doc(hidden)]
+    pub fn park_processor(&self, id: usize, prochdl: ProcMessageSender) {
+        let mut parked = self.parked_processors.lock().unwrap();
+        parked.insert(id, prochdl);
+    }
+
+    #[doc(hidden)]
+    pub fn unpark_processor(&self, id: usize) {
+        let mut parked = self.parked_processors.lock().unwrap();
+        parked.remove(&id);
     }
 }
 

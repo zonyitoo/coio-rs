@@ -40,6 +40,7 @@ extern crate deque;
 extern crate mio;
 extern crate rand;
 extern crate slab;
+extern crate linked_hash_map;
 
 pub mod join_handle;
 pub mod net;

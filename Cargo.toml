@@ -22,3 +22,4 @@ log = "0.3"
 mio = "0.5"
 rand = "0.3"
 slab = { git = "https://github.com/carllerche/slab.git", rev = "36c635b313619cec3d3595e53289b70f11aadff2" }
+linked-hash-map = "0.0.9"
