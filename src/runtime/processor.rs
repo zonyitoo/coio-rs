@@ -413,7 +413,7 @@ impl Processor {
                         }
                     }
                 } else {
-                    trace!("Coroutine `{}`: dropping", coro.debug_name());
+                    // Coroutine is dropped.
                 }
             }
             None => {
