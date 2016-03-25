@@ -1,5 +1,4 @@
 extern crate coio;
-extern crate env_logger;
 
 use std::io::{Read, Write};
 
@@ -48,8 +47,6 @@ fn test_tcp_echo() {
 
 #[test]
 fn test_udp_echo() {
-    env_logger::init().unwrap();
-
     Scheduler::new()
         .run(move || {
             const TEST_SLICE: &'static [u8] = b"abcdefg";

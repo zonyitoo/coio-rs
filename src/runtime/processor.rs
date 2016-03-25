@@ -21,17 +21,16 @@
 
 //! Processing unit of a thread
 
-use rand::Rng;
 use std::cell::UnsafeCell;
+use std::fmt;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
 use std::sync::mpsc::{self, Receiver, Sender, SendError};
 use std::thread::{self, Builder};
-use std::fmt;
 
 use deque::{self, Worker, Stealer, Stolen};
-use rand;
+use rand::{self, Rng};
 
 use coroutine::{Coroutine, State, Handle};
 use scheduler::Scheduler;
@@ -44,7 +43,7 @@ type BlockWithCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
 #[derive(Clone)]
 pub struct ProcMessageSender {
     inner: Sender<ProcMessage>,
-    processor: Arc<ProcessorInner>,
+    _processor: Processor,
 }
 
 impl ProcMessageSender {
@@ -64,12 +63,51 @@ pub struct Machine {
 }
 
 /// Control handle for the Processor
+///
+/// This wrapper struct is necessary to ensure safe usage with some operations. For instance:
+/// `park_with()` will park the current Coroutine running on a certain Processor.
+/// When the Coroutine is resumed later on it is not guaranteed that it's still
+/// running on the previous Processor. The same thing is true for `sched()`.
+/// In both cases one is forced to acquire a new ProcessorHandle.
 pub struct ProcessorHandle(&'static mut Processor);
 
 impl ProcessorHandle {
     #[inline]
     pub fn id(&self) -> usize {
         self.0.id()
+    }
+
+    #[inline]
+    pub fn sched(self) {
+        self.0.sched()
+    }
+
+    #[inline]
+    pub fn handle(&self) -> ProcMessageSender {
+        self.0.handle()
+    }
+
+    #[inline]
+    pub fn scheduler(&self) -> &Scheduler {
+        self.0.scheduler()
+    }
+
+    #[inline]
+    pub fn ready(&mut self, coroutine: Handle) {
+        self.0.ready(coroutine)
+    }
+
+    #[inline]
+    pub fn current(&mut self) -> Option<&mut Handle> {
+        self.0.current_coroutine()
+    }
+
+    pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
+        where F: FnOnce() + Send + 'static
+    {
+        let mut new_coro = Coroutine::spawn_opts(f, opts);
+        new_coro.set_preferred_processor(Some(self.0.weak_self().clone()));
+        self.ready(new_coro);
     }
 
     /// Obtains the currently running coroutine after setting it's state to Parked.
@@ -105,40 +143,25 @@ impl ProcessorHandle {
             f(p, coro);
         }
     }
+}
 
-    /// Yield the current coroutine
+impl Eq for ProcessorHandle {}
+
+impl PartialEq<Processor> for ProcessorHandle {
     #[inline]
-    pub fn sched(self) {
-        self.0.sched()
+    fn eq(&self, other: &Processor) -> bool {
+        let a = self.0.inner.deref() as *const ProcessorInner;
+        let b = other.deref() as *const ProcessorInner;
+        a == b
     }
+}
 
+impl PartialEq<ProcessorHandle> for ProcessorHandle {
     #[inline]
-    pub fn handle(&self) -> ProcMessageSender {
-        self.0.handle()
-    }
-
-    #[inline]
-    pub fn scheduler(&self) -> &Scheduler {
-        self.0.scheduler()
-    }
-
-    #[inline]
-    pub fn ready(&mut self, coroutine: Handle) {
-        self.0.ready(coroutine)
-    }
-
-    #[inline]
-    pub fn current(&mut self) -> Option<&mut Handle> {
-        self.0.current_coroutine()
-    }
-
-    pub fn spawn_opts<F>(&mut self, f: F, opts: Options)
-        where F: FnOnce() + Send + 'static
-    {
-        let mut new_coro = Coroutine::spawn_opts(f, opts);
-        new_coro.set_preferred_processor(Some(self.0.weak_self().clone()));
-        new_coro.attach(unsafe { self.0.scheduler().work_counter() });
-        self.ready(new_coro);
+    fn eq(&self, other: &ProcessorHandle) -> bool {
+        let a = self.0.inner.deref() as *const ProcessorInner;
+        let b = other.0.inner.deref() as *const ProcessorInner;
+        a == b
     }
 }
 
@@ -177,7 +200,7 @@ pub struct ProcessorInner {
 }
 
 impl Processor {
-    pub fn new(sched: *mut Scheduler, processor_id: usize) -> Machine {
+    pub fn spawn(sched: *mut Scheduler, processor_id: usize) -> Machine {
         let (worker, stealer) = deque::new();
         let (tx, rx) = mpsc::channel();
 
@@ -235,11 +258,7 @@ impl Processor {
 
     /// Get the thread local processor.
     pub fn current() -> Option<ProcessorHandle> {
-        Processor::instance().map(ProcessorHandle)
-    }
-
-    pub fn instance<'a>() -> Option<&'a mut Processor> {
-        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut() })
+        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut().map(ProcessorHandle) })
     }
 
     pub fn current_coroutine(&mut self) -> Option<&mut Handle> {
@@ -265,7 +284,7 @@ impl Processor {
     pub fn handle(&self) -> ProcMessageSender {
         ProcMessageSender {
             inner: self.chan_sender.clone(),
-            processor: self.inner.clone(),
+            _processor: self.clone(),
         }
     }
 
@@ -279,9 +298,9 @@ impl Processor {
                 self.resume(hdl);
             }
 
-            // 2. Check the mainbox
+            // 2. Check the receiving channel
             {
-                let mut resume_all_tasks = false;
+                let mut queue_dirty = false;
 
                 while let Ok(msg) = self.chan_receiver.try_recv() {
                     match msg {
@@ -293,13 +312,13 @@ impl Processor {
                         ProcMessage::Ready(mut coro) => {
                             coro.set_preferred_processor(Some(self.weak_self.clone()));
                             self.ready(coro);
-                            resume_all_tasks = true;
+                            queue_dirty = true;
                         }
                     }
                 }
 
                 // Prefer running own tasks before stealing --> "continue" from anew.
-                if resume_all_tasks {
+                if queue_dirty {
                     continue 'outerloop;
                 }
             }
@@ -416,9 +435,7 @@ impl Processor {
                     // Coroutine is dropped.
                 }
             }
-            None => {
-                panic!("Current Coroutine not found");
-            }
+            None => {}
         }
     }
 
@@ -443,14 +460,36 @@ impl Processor {
 impl Deref for Processor {
     type Target = ProcessorInner;
 
+    #[inline]
     fn deref(&self) -> &ProcessorInner {
         self.inner.deref()
     }
 }
 
 impl DerefMut for Processor {
+    #[inline]
     fn deref_mut(&mut self) -> &mut ProcessorInner {
         unsafe { &mut *(self.inner.deref() as *const ProcessorInner as *mut ProcessorInner) }
+    }
+}
+
+impl Eq for Processor {}
+
+impl PartialEq<Processor> for Processor {
+    #[inline]
+    fn eq(&self, other: &Processor) -> bool {
+        let a = self.inner.deref() as *const ProcessorInner;
+        let b = other.deref() as *const ProcessorInner;
+        a == b
+    }
+}
+
+impl PartialEq<ProcessorHandle> for Processor {
+    #[inline]
+    fn eq(&self, other: &ProcessorHandle) -> bool {
+        let a = self.inner.deref() as *const ProcessorInner;
+        let b = other.0.inner.deref() as *const ProcessorInner;
+        a == b
     }
 }
 
@@ -459,9 +498,6 @@ impl DerefMut for Processor {
 pub struct WeakProcessor {
     inner: Weak<ProcessorInner>,
 }
-
-unsafe impl Send for WeakProcessor {}
-unsafe impl Sync for WeakProcessor {}
 
 impl WeakProcessor {
     pub fn upgrade(&self) -> Option<Processor> {

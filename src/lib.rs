@@ -59,6 +59,7 @@ mod runtime;
 use std::panic;
 use std::thread;
 use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 
 /// Spawn a new Coroutine
 #[inline]
@@ -138,12 +139,49 @@ impl Builder {
     }
 }
 
+
+#[cfg(debug_assertions)]
+static GLOBAL_WORK_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
+
+#[inline]
+#[cfg(debug_assertions)]
+fn global_work_count_add() {
+    GLOBAL_WORK_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+#[cfg(debug_assertions)]
+fn global_work_count_sub() {
+    GLOBAL_WORK_COUNT.fetch_sub(1, Ordering::Relaxed);
+}
+
+#[inline]
+#[cfg(debug_assertions)]
+fn global_work_count_get() -> usize {
+    GLOBAL_WORK_COUNT.load(Ordering::Relaxed)
+}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn global_work_count_add() {}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn global_work_count_sub() {}
+
+#[inline]
+#[cfg(not(debug_assertions))]
+fn global_work_count_get() -> usize {
+    0
+}
+
 unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
     let mut f = Some(f);
     let f = &mut f as *mut Option<F> as usize;
 
     panic::recover(move || (*(f as *mut Option<F>)).take().unwrap()())
 }
+
 
 #[cfg(test)]
 mod test {

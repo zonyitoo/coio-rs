@@ -27,7 +27,6 @@ use std::io::{self, Write};
 use std::mem;
 use std::panic;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -50,9 +49,7 @@ pub struct JoinHandle<T> {
 unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 impl<T> JoinHandle<T> {
-    /// Join the coroutine until it finishes.
-    ///
-    /// If it already finished, this method will return immediately.
+    /// Await completion of the coroutine and return it's result.
     pub fn join(self) -> Result<T, Box<Any + Send + 'static>> {
         self.result.pop()
     }
@@ -166,7 +163,6 @@ pub struct Scheduler {
     // Mio event loop handler
     event_loop_sender: Option<Sender<Message>>,
     slab: Slab<ReadyStates, usize>,
-    work_count: Arc<AtomicUsize>,
 
     parked_processors: Mutex<LinkedHashMap<usize, ProcMessageSender>>,
 }
@@ -182,7 +178,6 @@ impl Scheduler {
 
             event_loop_sender: None,
             slab: Slab::new(1024),
-            work_count: Arc::new(AtomicUsize::new(0)),
 
             parked_processors: Mutex::new(LinkedHashMap::new()),
         }
@@ -203,13 +198,7 @@ impl Scheduler {
 
     #[inline]
     pub fn work_count(&self) -> usize {
-        self.work_count.load(Ordering::SeqCst)
-    }
-
-    #[doc(hidden)]
-    #[inline]
-    pub unsafe fn work_counter(&self) -> Arc<AtomicUsize> {
-        self.work_count.clone()
+        ::global_work_count_get()
     }
 
     /// Run the scheduler
@@ -217,8 +206,8 @@ impl Scheduler {
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
-        let default_handler = panic::take_handler();
-        panic::set_handler(move |panic_info| {
+        let default_handler = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
             if let Some(mut p) = Processor::current() {
                 if let Some(c) = p.current() {
                     let mut stderr = io::stderr();
@@ -227,12 +216,12 @@ impl Scheduler {
             }
 
             default_handler(panic_info);
-        });
+        }));
 
         let mut machines = Vec::with_capacity(self.expected_worker_count);
 
         for tid in 0..self.expected_worker_count {
-            machines.push(Processor::new(self, tid));
+            machines.push(Processor::spawn(self, tid));
         }
 
         for x in 0..machines.len() {
@@ -259,31 +248,26 @@ impl Scheduler {
 
                 *result = Some(ret);
 
-                trace!("Main Coroutine is finished with result {}, going to shutdown",
-                       match result.as_ref().unwrap() {
-                           &Ok(..) => "Ok(..)",
-                           &Err(..) => "Err(..)",
-                       });
+                trace!("Coroutine `<main>` finished => sending Shutdown");
                 cloned_event_loop_sender.send(Message::Shutdown).unwrap();
             };
 
-            // let f: Box<FnBox()> = Box::new(wrapper);
             let mut opt = self.default_spawn_options.clone();
             opt.name("<main>".to_owned());
-            let mut main_coro = Coroutine::spawn_opts(wrapper, opt);
-
-            main_coro.attach(self.work_count.clone());
+            let main_coro = Coroutine::spawn_opts(wrapper, opt);
 
             machines[0].processor_handle.send(ProcMessage::Ready(main_coro)).unwrap();
         };
 
         event_loop.run(self).unwrap();
 
-        trace!("Scheduler is going to shutdown, asking all the threads to shutdown");
+        trace!("EventLoop finished => sending Shutdown");
 
         for m in machines.iter() {
             m.processor_handle.send(ProcMessage::Shutdown).unwrap();
         }
+
+        trace!("awaiting completion of Machines");
 
         // NOTE: It's critical that all threads are joined since Processor
         // maintains a reference to this Scheduler using raw pointers.
@@ -291,10 +275,10 @@ impl Scheduler {
             let _ = m.thread_handle.join();
         }
 
-        trace!("All worker threads are shutdown, it's time to say good bye :)");
+        trace!("Machines finished");
 
         // Restore panic handler
-        panic::take_handler();
+        panic::take_hook();
 
         result.unwrap()
     }
@@ -338,6 +322,8 @@ impl Scheduler {
 
     /// Suspend the current coroutine or thread
     pub fn sched() {
+        trace!("Scheduler::sched()");
+
         match Processor::current() {
             Some(p) => p.sched(),
             None => thread::yield_now(),
@@ -358,20 +344,9 @@ impl Scheduler {
 
         let current = Processor::current();
 
-        // Try to wake up a parked processor
-        if let Some(ref processor) = current {
-            let mut parked = processor.scheduler().parked_processors.lock().unwrap();
-            if let Some((_, prochdl)) = parked.pop_front() {
-                trace!("Coroutine `{}`: pushing into a parked processor",
-                       coro.debug_name());
-                let _ = prochdl.send(ProcMessage::Ready(coro));
-                return;
-            }
-        }
-
         if let Some(mut preferred) = coro.preferred_processor() {
-            if let Some(ref curr) = current {
-                if preferred.id() == curr.id() {
+            if let Some(current) = current {
+                if preferred == current {
                     trace!("Coroutine `{}`: pushing into preferred queue",
                            coro.debug_name());
 

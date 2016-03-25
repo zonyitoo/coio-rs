@@ -25,8 +25,6 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::panic;
 use std::ptr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::usize;
 
 use context::{Context, Transfer};
@@ -39,19 +37,18 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
     // Take over the data from Coroutine::spawn_opts
     let InitData { stack, callback } = unsafe {
         let data_opt_ref = &mut *(t.data as *mut Option<InitData>);
-        data_opt_ref.take().unwrap()
-    };
-
-    let mut meta = Coroutine {
-        context: None,
-        global_work_count: None,
-        name: None,
-        preferred_processor: None,
-        state: State::Suspended,
+        data_opt_ref.take().expect("failed to acquire InitData")
     };
 
     // This block will ensure the `meta` will be destroied before dropping the stack
     let ctx = {
+        let mut meta = Coroutine {
+            context: None,
+            name: None,
+            preferred_processor: None,
+            state: State::Suspended,
+        };
+
         // Yield back after take out the callback function
         // Now the Coroutine is initialized
         let meta_ptr = &mut meta as *mut _ as usize;
@@ -69,13 +66,12 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
             })
         };
 
-        trace!("Coroutine `{}`: finished", meta.debug_name());
+        trace!("Coroutine `{}`: finished => dropping stack",
+               meta.debug_name());
 
         // If panicked inside, the meta.context stores the actual return Context
-        meta.context.take().unwrap()
+        meta.take_context()
     };
-
-    trace!("Coroutine `{}`: dropping stack", meta.debug_name());
 
     // Drop the stack after it is finished
     let mut stack_opt = Some(stack);
@@ -98,11 +94,11 @@ extern "C" fn coroutine_exit(mut t: Transfer) -> Transfer {
 extern "C" fn coroutine_unwind(t: Transfer) -> Transfer {
     // Save the Context in the Coroutine object
     // because the `t` won't be able to be passed to the caller
-    unsafe {
-        let coro = &mut *(t.data as *mut Coroutine);
-        coro.context = Some(t.context);
-    }
+    let coro = unsafe { &mut *(t.data as *mut Coroutine) };
 
+    coro.context = Some(t.context);
+
+    trace!("Coroutine `{}`: unwinding", coro.debug_name());
     panic::propagate(Box::new(ForceUnwind));
 }
 
@@ -124,7 +120,6 @@ pub enum State {
 /// Coroutine is nothing more than a context and a stack
 pub struct Coroutine {
     context: Option<Context>,
-    global_work_count: Option<Arc<AtomicUsize>>,
     name: Option<String>,
     preferred_processor: Option<WeakProcessor>,
     state: State,
@@ -132,21 +127,7 @@ pub struct Coroutine {
 
 unsafe impl Send for Coroutine {}
 
-impl Drop for Coroutine {
-    fn drop(&mut self) {
-        if let Some(gwc) = self.global_work_count.as_ref() {
-            gwc.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-}
-
 impl Coroutine {
-    #[inline]
-    pub fn attach(&mut self, gwc: Arc<AtomicUsize>) {
-        gwc.fetch_add(1, Ordering::SeqCst);
-        self.global_work_count = Some(gwc);
-    }
-
     #[inline]
     pub fn spawn_opts<F>(f: F, opts: Options) -> Handle
         where F: FnOnce() + Send + 'static
@@ -156,7 +137,7 @@ impl Coroutine {
 
     fn spawn_opts_impl(f: Box<FnBox()>, opts: Options) -> Handle {
         let data = InitData {
-            stack: ProtectedFixedSizeStack::new(opts.stack_size).unwrap(),
+            stack: ProtectedFixedSizeStack::new(opts.stack_size).expect("failed to acquire stack"),
             callback: f,
         };
 
@@ -174,6 +155,8 @@ impl Coroutine {
             coro_ref.set_name(name);
         }
 
+        ::global_work_count_add();
+
         // Done!
         Handle(coro_ref)
     }
@@ -185,7 +168,7 @@ impl Coroutine {
 
     #[inline]
     pub fn preferred_processor(&self) -> Option<Processor> {
-        self.preferred_processor.as_ref().and_then(|p| p.upgrade())
+        self.preferred_processor.as_ref().and_then(WeakProcessor::upgrade)
     }
 
     #[inline]
@@ -207,20 +190,32 @@ impl Coroutine {
     pub fn debug_name(&self) -> String {
         match self.name {
             Some(ref name) => name.clone(),
-            None => format!("{:p}", &self),
+            None => format!("{:p}", self),
         }
+    }
+
+    #[inline]
+    fn take_context(&mut self) -> Context {
+        self.context.take().expect("failed to take context")
     }
 }
 
-/// Sendable coroutine mutable pointer
-#[derive(Copy, Clone, Debug)]
-pub struct SendableCoroutinePtr(pub *mut Coroutine);
-unsafe impl Send for SendableCoroutinePtr {}
+#[cfg(debug_assertions)]
+impl Drop for Coroutine {
+    fn drop(&mut self) {
+        ::global_work_count_sub();
+    }
+}
 
 /// Handle for a Coroutine
+#[derive(Eq, PartialEq)]
 pub struct Handle(*mut Coroutine);
 
 impl Handle {
+    pub unsafe fn empty() -> Handle {
+        Handle(ptr::null_mut())
+    }
+
     #[doc(hidden)]
     #[inline]
     pub fn into_raw(self) -> *mut Coroutine {
@@ -244,20 +239,26 @@ impl Handle {
 
     /// Resume the Coroutine
     #[doc(hidden)]
+    #[inline]
     pub fn resume(&mut self, data: usize) -> usize {
-        debug_assert!(data != usize::MAX);
         self.yield_with(State::Running, data)
     }
 
-    /// Yield the Coroutine to its parent with data
+    /// Yields the Coroutine to the Processor
     #[inline(never)]
     pub fn yield_with(&mut self, state: State, data: usize) -> usize {
         debug_assert!(data != usize::MAX);
+        assert!(self.0 != ptr::null_mut());
 
         let coro = unsafe { &mut *self.0 };
+        let context = coro.take_context();
+
+        trace!("Coroutine `{}`: yielding to {:?}",
+               coro.debug_name(),
+               &context);
+
         coro.state = state;
 
-        let context = coro.context.take().unwrap();
         let Transfer { context, data } = context.resume(data);
 
         // We've returned from a yield to the Processor, because it resume()d us!
@@ -298,8 +299,12 @@ impl Drop for Handle {
 
         trace!("Coroutine `{}`: force unwinding", self.debug_name());
 
-        let ctx = self.context.take().unwrap();
-        ctx.resume_ontop(self.0 as *mut Coroutine as usize, coroutine_unwind);
+        let ctx = self.take_context();
+        let coro = mem::replace(&mut self.0, ptr::null_mut());
+
+        ctx.resume_ontop(coro as usize, coroutine_unwind);
+
+        trace!("Coroutine `{}`: force unwound", self.debug_name());
     }
 }
 
@@ -318,12 +323,11 @@ impl fmt::Debug for Handle {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use scheduler::Scheduler;
     use options::Options;
-
+    use scheduler::Scheduler;
     use super::*;
 
     #[test]
@@ -335,20 +339,39 @@ mod test {
 
             Scheduler::new()
                 .run(|| {
-                    let handle = Scheduler::spawn(move || {
-                        struct Test(Arc<AtomicUsize>);
+                    let coro_container = Arc::new(Mutex::new(None));
 
-                        impl Drop for Test {
-                            fn drop(&mut self) {
-                                self.0.store(1, Ordering::SeqCst);
+                    let handle = {
+                        let coro_container = coro_container.clone();
+
+                        Scheduler::spawn(move || {
+                            struct DropCheck(Arc<AtomicUsize>);
+
+                            impl Drop for DropCheck {
+                                fn drop(&mut self) {
+                                    self.0.store(1, Ordering::SeqCst);
+                                }
                             }
-                        }
 
-                        let test = Test(shared_usize);
+                            let drop_check = DropCheck(shared_usize);
 
-                        Scheduler::park_with(|_, coro| drop(coro));
-                        test.0.store(2, Ordering::SeqCst);
+                            Scheduler::park_with(|_, coro| {
+                                *coro_container.lock().unwrap() = Some(coro);
+                            });
+
+                            drop_check.0.store(2, Ordering::SeqCst);
+                        })
+                    };
+
+                    Scheduler::sched();
+
+                    let mut coro_container = coro_container.lock().unwrap();
+                    assert!(match *coro_container {
+                        Some(..) => true,
+                        None => false,
                     });
+
+                    *coro_container = None; // drop the Coroutine
 
                     let result = handle.join();
                     assert!(result.is_err());
@@ -362,7 +385,6 @@ mod test {
     #[test]
     fn coroutine_drop_after_initialized() {
         let f = || {};
-        let coro = Coroutine::spawn_opts(f, Options::default());
-        drop(coro);
+        let _ = Coroutine::spawn_opts(f, Options::default());
     }
 }
