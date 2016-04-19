@@ -99,7 +99,7 @@ extern "C" fn coroutine_unwind(t: Transfer) -> Transfer {
     coro.context = Some(t.context);
 
     trace!("Coroutine `{}`: unwinding", coro.debug_name());
-    panic::propagate(Box::new(ForceUnwind));
+    panic::resume_unwind(Box::new(ForceUnwind));
 }
 
 #[derive(Debug)]

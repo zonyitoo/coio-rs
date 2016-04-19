@@ -26,10 +26,7 @@
     arc_counts,
     fnbox,
     panic_handler,
-    panic_propagate,
-    recover,
     reflect_marker,
-    std_panic,
 )]
 
 #[macro_use]
@@ -179,7 +176,7 @@ unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
     let mut f = Some(f);
     let f = &mut f as *mut Option<F> as usize;
 
-    panic::recover(move || (*(f as *mut Option<F>)).take().unwrap()())
+    panic::catch_unwind(move || (*(f as *mut Option<F>)).take().unwrap()())
 }
 
 
