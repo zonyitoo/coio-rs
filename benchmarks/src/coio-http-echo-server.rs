@@ -18,23 +18,23 @@ fn main() {
     let matches = App::new("coio-http-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
-                      .arg(Arg::with_name("BIND")
+                      .arg(Arg::with_name("bind")
                                .short("b")
                                .long("bind")
                                .takes_value(true)
                                .required(true)
                                .help("Listening on this address"))
-                      .arg(Arg::with_name("THREADS")
+                      .arg(Arg::with_name("threads")
                                .short("t")
                                .long("threads")
                                .takes_value(true)
                                .help("Number of threads"))
                       .get_matches();
 
-    let bind_addr = matches.value_of("BIND").unwrap().to_owned();
+    let bind_addr = matches.value_of("bind").unwrap().to_owned();
 
     Scheduler::new()
-        .with_workers(matches.value_of("THREADS").unwrap_or("1").parse().unwrap())
+        .with_workers(matches.value_of("threads").unwrap_or("1").parse().unwrap())
         .run(move || {
             let server = TcpListener::bind(&bind_addr[..]).unwrap();
 

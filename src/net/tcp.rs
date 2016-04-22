@@ -83,7 +83,7 @@ impl TcpListener {
         create_tcp_listener!(inner)
     }
 
-    pub fn incoming<'a>(&'a self) -> Incoming<'a> {
+    pub fn incoming(&self) -> Incoming {
         Incoming(self)
     }
 }

@@ -1,12 +1,12 @@
-use std::any::Any;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
+use std::thread;
 
 use sync::mono_barrier::MonoBarrier;
 
 struct JoinHandleInner<T> {
     barrier: MonoBarrier,
-    data: UnsafeCell<Option<Result<T, Box<Any + Send + 'static>>>>,
+    data: UnsafeCell<Option<thread::Result<T>>>,
 }
 
 unsafe impl<T: Send> Send for JoinHandleInner<T> {}
@@ -26,7 +26,7 @@ pub struct JoinHandleSender<T> {
 }
 
 impl<T> JoinHandleSender<T> {
-    pub fn push(self, result: Result<T, Box<Any + Send + 'static>>) {
+    pub fn push(self, result: thread::Result<T>) {
         let data = unsafe { &mut *self.inner.data.get() };
         *data = Some(result);
         self.inner.barrier.notify();
@@ -39,7 +39,7 @@ pub struct JoinHandleReceiver<T> {
 }
 
 impl<T> JoinHandleReceiver<T> {
-    pub fn pop(mut self) -> Result<T, Box<Any + Send + 'static>> {
+    pub fn pop(mut self) -> thread::Result<T> {
         self.inner.barrier.wait().unwrap();
         let data = unsafe { &mut *self.inner.data.get() };
         self.received = true;

@@ -13,7 +13,7 @@ fn main() {
     let matches = App::new("threaded-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
-                      .arg(Arg::with_name("BIND")
+                      .arg(Arg::with_name("bind")
                                .short("b")
                                .long("bind")
                                .takes_value(true)
@@ -21,7 +21,7 @@ fn main() {
                                .help("Listening on this address"))
                       .get_matches();
 
-    let bind_addr = matches.value_of("BIND").unwrap();
+    let bind_addr = matches.value_of("bind").unwrap();
 
     loop {
         let server = TcpListener::bind(bind_addr).unwrap();

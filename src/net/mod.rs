@@ -185,10 +185,12 @@ impl<E: Evented + Debug + AsRawFd> AsRawFd for GenericEvented<E> {
 struct SyncGuard(bool);
 
 impl SyncGuard {
+    #[inline]
     pub fn new() -> SyncGuard {
         SyncGuard(true)
     }
 
+    #[inline]
     pub fn disarm(&mut self) {
         self.0 = false;
     }

@@ -26,9 +26,8 @@ pub use std::sync::mpsc::{TrySendError, SendError, TryRecvError, RecvError};
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 
-use coroutine::Handle;
+use coroutine::HandleList;
 use runtime::Processor;
 use scheduler::Scheduler;
 
@@ -36,7 +35,7 @@ use scheduler::Scheduler;
 pub struct Sender<T> {
     inner: Option<mpsc::Sender<T>>,
 
-    wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    wait_list: Arc<Mutex<HandleList>>,
 }
 
 unsafe impl<T: Send> Send for Sender<T> {}
@@ -59,9 +58,7 @@ impl<T> Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Drop the inner Sender first
-        {
-            self.inner.take();
-        }
+        let _ = self.inner.take();
 
         // Try to wake up all the pending coroutines if this is the last Sender.
         // Because if this is the last Sender, there won't be another one to push
@@ -69,9 +66,8 @@ impl<T> Drop for Sender<T> {
         // who ownes the other end of this channel.
         if Arc::strong_count(&self.wait_list) <= 2 {
             let mut wait_list = self.wait_list.lock().unwrap();
-            for hdl in wait_list.drain(..) {
-                trace!("Coroutine `{}` is awaken by dropping Sender in wait_list",
-                       hdl.debug_name());
+            while let Some(hdl) = wait_list.pop_front() {
+                trace!("{:?} is awaken by dropping Sender in wait_list", hdl);
                 Scheduler::ready(hdl);
             }
         }
@@ -81,7 +77,7 @@ impl<T> Drop for Sender<T> {
 pub struct Receiver<T> {
     inner: mpsc::Receiver<T>,
 
-    wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    wait_list: Arc<Mutex<HandleList>>,
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
@@ -138,7 +134,7 @@ impl<T> Receiver<T> {
 /// Create a channel pair
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::channel();
-    let wait_list = Arc::new(Mutex::new(VecDeque::new()));
+    let wait_list = Arc::new(Mutex::new(HandleList::new()));
 
     let sender = Sender {
         inner: Some(tx),
@@ -157,8 +153,8 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
 pub struct SyncSender<T> {
     inner: Option<mpsc::SyncSender<T>>,
 
-    send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
-    recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    send_wait_list: Arc<Mutex<HandleList>>,
+    recv_wait_list: Arc<Mutex<HandleList>>,
 }
 
 unsafe impl<T: Send> Send for SyncSender<T> {}
@@ -169,9 +165,9 @@ impl<T> SyncSender<T> {
             Ok(..) => {
                 let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
                 if let Some(coro) = recv_wait_list.pop_front() {
-                    trace!("Coroutine `{}` is waken up in SyncSender receive_wait_list, {} \
+                    trace!("{:?} is waken up in SyncSender receive_wait_list, {} \
                             remains",
-                           coro.debug_name(),
+                           coro,
                            recv_wait_list.len());
                     Scheduler::ready(coro);
                 }
@@ -249,9 +245,9 @@ impl<T> Drop for SyncSender<T> {
         // who ownes the other end of this channel.
         if Arc::strong_count(&self.recv_wait_list) <= 2 {
             let mut recv_wait_list = self.recv_wait_list.lock().unwrap();
-            for hdl in recv_wait_list.drain(..) {
-                trace!("Coroutine `{}` is awaken by dropping SyncSender in recv_wait_list",
-                       hdl.debug_name());
+            while let Some(hdl) = recv_wait_list.pop_front() {
+                trace!("{:?} is awaken by dropping SyncSender in recv_wait_list",
+                       hdl);
                 Scheduler::ready(hdl);
             }
         }
@@ -261,8 +257,8 @@ impl<T> Drop for SyncSender<T> {
 pub struct SyncReceiver<T> {
     inner: Option<mpsc::Receiver<T>>,
 
-    send_wait_list: Arc<Mutex<VecDeque<Handle>>>,
-    recv_wait_list: Arc<Mutex<VecDeque<Handle>>>,
+    send_wait_list: Arc<Mutex<HandleList>>,
+    recv_wait_list: Arc<Mutex<HandleList>>,
 }
 
 unsafe impl<T: Send> Send for SyncReceiver<T> {}
@@ -273,8 +269,8 @@ impl<T> SyncReceiver<T> {
             Ok(t) => {
                 let mut send_wait_list = self.send_wait_list.lock().unwrap();
                 if let Some(coro) = send_wait_list.pop_front() {
-                    trace!("Coroutine `{}` is waken up in SyncReceiver send_wait_list, {} remains",
-                           coro.debug_name(),
+                    trace!("{:?} is waken up in SyncReceiver send_wait_list, {} remains",
+                           coro,
                            send_wait_list.len());
                     Scheduler::ready(coro);
                 }
@@ -341,19 +337,24 @@ impl<T> Drop for SyncReceiver<T> {
         // Because there won't be another one to push items into this queue, so we
         // have to wake the coroutine up explicitly, who ownes the other end of this channel.
         let mut send_wait_list = self.send_wait_list.lock().unwrap();
-        for hdl in send_wait_list.drain(..) {
-            trace!("Coroutine `{}` is awaken by dropping SyncReceiver in send_wait_list",
-                   hdl.debug_name());
+        while let Some(hdl) = send_wait_list.pop_front() {
+            trace!("{:?} is awaken by dropping SyncReceiver in send_wait_list",
+                   hdl);
             Scheduler::ready(hdl);
         }
     }
 }
 
 /// Create a bounded channel pair
+///
+/// NOTE: Due to the implementation of sync channel in libstd, you will get `RecvError` from `SyncReceiver::recv`
+/// no matter if there still have data inside the queue after you dropped the `SyncSender`.
+///
+/// Tracking issue: https://github.com/zonyitoo/coio-rs/issues/31
 pub fn sync_channel<T>(bound: usize) -> (SyncSender<T>, SyncReceiver<T>) {
     let (tx, rx) = mpsc::sync_channel(bound);
-    let send_wait_list = Arc::new(Mutex::new(VecDeque::new()));
-    let recv_wait_list = Arc::new(Mutex::new(VecDeque::new()));
+    let send_wait_list = Arc::new(Mutex::new(HandleList::new()));
+    let recv_wait_list = Arc::new(Mutex::new(HandleList::new()));
 
     let sender = SyncSender {
         inner: Some(tx),

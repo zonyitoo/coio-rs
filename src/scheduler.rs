@@ -21,24 +21,25 @@
 
 //! Global coroutine scheduler
 
-use std::any::Any;
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::io::{self, Write};
 use std::mem;
 use std::panic;
-use std::sync::{Arc, Mutex};
+use std::ptr;
+use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use mio::{Evented, EventLoop, EventSet, Handler, NotifyError, PollOpt, Sender, TimerError, Token};
 use slab::Slab;
-use linked_hash_map::LinkedHashMap;
 
-use coroutine::{Handle, Coroutine};
+use coroutine::{Coroutine, Handle, HandleList};
 use join_handle::{self, JoinHandleReceiver};
 use options::Options;
-use runtime::processor::{Processor, ProcMessage, ProcMessageSender};
-use sync::mono_barrier::CoroMonoBarrier;
+use runtime::processor::{self, Machine, Processor, ProcMessage};
+use sync::spinlock::Spinlock;
 
 
 /// A handle that could join the coroutine
@@ -50,7 +51,7 @@ unsafe impl<T: Send> Send for JoinHandle<T> {}
 
 impl<T> JoinHandle<T> {
     /// Await completion of the coroutine and return it's result.
-    pub fn join(self) -> Result<T, Box<Any + Send + 'static>> {
+    pub fn join(self) -> thread::Result<T> {
         self.result.pop()
     }
 }
@@ -67,7 +68,7 @@ pub struct RegisterMessage {
 
 impl RegisterMessage {
     #[inline]
-    fn new<'a>(coro: Handle, cb: RegisterCallback<'a>) -> RegisterMessage {
+    fn new(coro: Handle, cb: RegisterCallback) -> RegisterMessage {
         RegisterMessage {
             cb: unsafe { mem::transmute(cb) },
             coro: coro,
@@ -84,7 +85,7 @@ pub struct DeregisterMessage {
 
 impl DeregisterMessage {
     #[inline]
-    fn new<'a>(coro: Handle, cb: DeregisterCallback<'a>, token: Token) -> DeregisterMessage {
+    fn new(coro: Handle, cb: DeregisterCallback, token: Token) -> DeregisterMessage {
         DeregisterMessage {
             cb: unsafe { mem::transmute(cb) },
             coro: coro,
@@ -124,6 +125,7 @@ unsafe impl Send for Message {}
 
 #[doc(hidden)]
 #[repr(usize)]
+#[derive(Clone, Copy)]
 pub enum ReadyType {
     Readable = 0,
     Writable,
@@ -131,27 +133,71 @@ pub enum ReadyType {
     Hup,
 }
 
+impl Into<EventSet> for ReadyType {
+    fn into(self) -> EventSet {
+        unsafe { mem::transmute(1usize << self as usize) }
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct ReadyStates(Arc<[CoroMonoBarrier; 4]>);
+pub struct ReadyStates(Arc<Spinlock<(EventSet, [Option<Handle>; 4])>>);
 
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
-        ReadyStates(Arc::new([CoroMonoBarrier::new(),
-                              CoroMonoBarrier::new(),
-                              CoroMonoBarrier::new(),
-                              CoroMonoBarrier::new()]))
+        ReadyStates(Arc::new(Spinlock::new((EventSet::none(), [None, None, None, None]))))
     }
 
     #[inline]
     pub fn wait(&self, ready_type: ReadyType) {
-        self.0[ready_type as usize].wait().unwrap();
+        let event_set: EventSet = ready_type.into();
+        let mut inner = self.0.lock();
+
+        if inner.0.contains(event_set) {
+            inner.0.remove(event_set);
+        } else {
+            drop(inner);
+
+            let p = Processor::current().expect("cannot wait without processor");
+            p.park_with(|p, coro| {
+                let mut inner = self.0.lock();
+
+                if inner.0.contains(event_set) {
+                    inner.0.remove(event_set);
+                    p.ready(coro);
+                } else {
+                    inner.1[ready_type as usize] = Some(coro);
+                }
+            });
+        }
     }
 
     #[inline]
-    pub fn notify(&self, ready_type: ReadyType) {
-        self.0[ready_type as usize].notify();
+    pub fn make_ready(&self, ready_type: ReadyType) {
+        self.0.lock().0.insert(ready_type.into());
+    }
+
+    // WARNING: `handles` has to be uninitialized
+    #[inline]
+    fn notify(&self, event_set: EventSet, handles: &mut [Handle; 4]) -> usize {
+        let mut inner = self.0.lock();
+        let mut handle_count = 0usize;
+
+        for i in 0..4usize {
+            let event: EventSet = unsafe { mem::transmute(1usize << i) };
+
+            if event_set.contains(event) {
+                if let Some(coro) = inner.1[i].take() {
+                    unsafe { ptr::write(handles.as_mut_ptr().offset(handle_count as isize), coro) };
+                    handle_count += 1;
+                } else {
+                    inner.0.insert(event);
+                }
+            }
+        }
+
+        handle_count
     }
 }
 
@@ -159,15 +205,28 @@ impl ReadyStates {
 pub struct Scheduler {
     default_spawn_options: Options,
     expected_worker_count: usize,
+    maximum_stack_memory_limit: usize,
 
     // Mio event loop handler
     event_loop_sender: Option<Sender<Message>>,
     slab: Slab<ReadyStates, usize>,
 
-    parked_processors: Mutex<LinkedHashMap<usize, ProcMessageSender>>,
-}
+    // NOTE:
+    // This member is _used_ concurrently, but still deliberately used without any kind of locks.
+    // The reason for this is that during runtime of the Scheduler the vector of Machines will
+    // never change and thus it's contents are constant as long as any Processor is running.
+    machines: UnsafeCell<Vec<Machine>>,
 
-unsafe impl Send for Scheduler {}
+    idle_processor_condvar: Condvar,
+    idle_processor_count: AtomicUsize,
+    idle_processor_mutex: Mutex<()>,
+    is_shutting_down: AtomicBool,
+    spinning_processor_count: AtomicUsize,
+
+    global_queue_size: AtomicUsize,
+    global_queue: Mutex<HandleList>,
+    io_handler_queue: HandleList,
+}
 
 impl Scheduler {
     /// Create a scheduler with default configurations
@@ -175,11 +234,22 @@ impl Scheduler {
         Scheduler {
             default_spawn_options: Options::default(),
             expected_worker_count: 1,
+            maximum_stack_memory_limit: 2 * 1024 * 1024 * 1024, // 2GB
 
             event_loop_sender: None,
             slab: Slab::new(1024),
 
-            parked_processors: Mutex::new(LinkedHashMap::new()),
+            machines: UnsafeCell::new(Vec::new()),
+
+            idle_processor_condvar: Condvar::new(),
+            idle_processor_count: AtomicUsize::new(0),
+            idle_processor_mutex: Mutex::new(()),
+            is_shutting_down: AtomicBool::new(false),
+            spinning_processor_count: AtomicUsize::new(0),
+
+            global_queue_size: AtomicUsize::new(0),
+            global_queue: Mutex::new(HandleList::new()),
+            io_handler_queue: HandleList::new(),
         }
     }
 
@@ -202,38 +272,29 @@ impl Scheduler {
     }
 
     /// Run the scheduler
-    pub fn run<F, T>(&mut self, f: F) -> Result<T, Box<Any + Send>>
+    pub fn run<F, T>(&mut self, f: F) -> thread::Result<T>
         where F: FnOnce() -> T + Send + 'static,
               T: Send + 'static
     {
+        trace!("setting custom panic hook");
+
         let default_handler = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
             if let Some(mut p) = Processor::current() {
-                if let Some(c) = p.current() {
+                if let Some(coro) = p.current() {
                     let mut stderr = io::stderr();
-                    let _ = write!(stderr, "Coroutine `{}` running in ", c.debug_name());
+                    let name = match coro.name() {
+                        Some(name) => name,
+                        None => "<unnamed>",
+                    };
+                    let _ = write!(stderr, "Coroutine `{}` running in ", name);
                 }
             }
 
             default_handler(panic_info);
         }));
 
-        let mut machines = Vec::with_capacity(self.expected_worker_count);
-
-        for tid in 0..self.expected_worker_count {
-            machines.push(Processor::spawn(self, tid));
-        }
-
-        for x in 0..machines.len() {
-            for y in 0..machines.len() {
-                if x != y {
-                    machines[x]
-                        .processor_handle
-                        .send(ProcMessage::NewNeighbor(machines[y].stealer.clone()))
-                        .unwrap();
-                }
-            }
-        }
+        trace!("creating EventLoop");
 
         let mut event_loop = EventLoop::new().unwrap();
         self.event_loop_sender = Some(event_loop.channel());
@@ -244,40 +305,70 @@ impl Scheduler {
         {
             let result = unsafe { &mut *(&mut result as *mut _) };
             let wrapper = move || {
-                let ret = unsafe { ::try(move || f()) };
+                let ret = panic::catch_unwind(panic::AssertUnwindSafe(f));
 
                 *result = Some(ret);
 
-                trace!("Coroutine `<main>` finished => sending Shutdown");
-                cloned_event_loop_sender.send(Message::Shutdown).unwrap();
+                trace!("Coroutine(<main>) finished => sending Shutdown");
+                let _ = cloned_event_loop_sender.send(Message::Shutdown);
             };
 
             let mut opt = self.default_spawn_options.clone();
             opt.name("<main>".to_owned());
-            let main_coro = Coroutine::spawn_opts(wrapper, opt);
+            let main_coro = Coroutine::spawn_opts(Box::new(wrapper), opt);
 
-            machines[0].processor_handle.send(ProcMessage::Ready(main_coro)).unwrap();
+            self.push_global_queue(main_coro);
         };
 
-        event_loop.run(self).unwrap();
+        let mut machines = unsafe { &mut *self.machines.get() };
+        machines.reserve(self.expected_worker_count);
+
+        trace!("spawning Machines");
+        {
+            let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
+            let mem = self.maximum_stack_memory_limit;
+
+            for tid in 0..self.expected_worker_count {
+                machines.push(Processor::spawn(self, tid, barrier.clone(), mem));
+            }
+
+            // After this Barrier unblocks we know that all Processors a fully spawned and
+            // ready to call Processor::schedule(). This knowledge plus the fact that machines
+            // is a static array after this point allows us to access that array without locks.
+            barrier.wait();
+        }
+
+        trace!("running EventLoop");
+
+        while event_loop.is_running() {
+            thread::sleep(::std::time::Duration::new(0, 500_000));
+            event_loop.run_once(self, None).unwrap();
+            self.append_io_handler_to_global_queue();
+        }
 
         trace!("EventLoop finished => sending Shutdown");
+        {
+            let barrier = Arc::new(Barrier::new(self.expected_worker_count));
 
-        for m in machines.iter() {
-            m.processor_handle.send(ProcMessage::Shutdown).unwrap();
+            for m in machines.iter() {
+                m.processor_handle.send(ProcMessage::Shutdown(barrier.clone())).unwrap();
+            }
         }
 
         trace!("awaiting completion of Machines");
+        {
+            self.is_shutting_down.store(true, Ordering::SeqCst);
+            self.idle_processor_condvar.notify_all();
 
-        // NOTE: It's critical that all threads are joined since Processor
-        // maintains a reference to this Scheduler using raw pointers.
-        for m in machines.drain(..) {
-            let _ = m.thread_handle.join();
+            // NOTE: It's critical that all threads are joined since Processor
+            // maintains a reference to this Scheduler using raw pointers.
+            for m in machines.drain(..) {
+                let _ = m.thread_handle.join();
+            }
         }
 
-        trace!("Machines finished");
-
         // Restore panic handler
+        trace!("restoring default panic hook");
         panic::take_hook();
 
         result.unwrap()
@@ -290,7 +381,7 @@ impl Scheduler {
 
     /// Get the global Scheduler
     pub fn instance_or_err() -> io::Result<&'static Scheduler> {
-        Self::instance().ok_or(io::Error::new(io::ErrorKind::Other, "Scheduler missing"))
+        Self::instance().ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Scheduler missing"))
     }
 
     /// Spawn a new coroutine with default options
@@ -309,12 +400,12 @@ impl Scheduler {
     {
         let (tx, rx) = join_handle::handle_pair();
         let wrapper = move || {
-            let ret = unsafe { ::try(move || f()) };
+            let ret = panic::catch_unwind(panic::AssertUnwindSafe(f));
 
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.push(ret);
         };
-        let mut processor = Processor::current().unwrap();
+        let mut processor = Processor::current().expect("Processor required for spawn");
         processor.spawn_opts(wrapper, opts);
 
         JoinHandle { result: rx }
@@ -340,38 +431,16 @@ impl Scheduler {
     /// A coroutine is ready for schedule
     #[doc(hidden)]
     pub fn ready(mut coro: Handle) {
-        trace!("Coroutine `{}`: readying", coro.debug_name());
+        trace!("{:?}: readying", coro);
 
-        let current = Processor::current();
-
-        if let Some(mut preferred) = coro.preferred_processor() {
-            if let Some(current) = current {
-                if preferred == current {
-                    trace!("Coroutine `{}`: pushing into preferred queue",
-                           coro.debug_name());
-
-                    // We're on the same thread ---> use the faster ready() method.
-                    return preferred.ready(coro);
-                }
-            }
-
-            trace!("Coroutine `{}`: sending to preferred {:?}",
-                   coro.debug_name(),
-                   preferred);
-
-            let _ = preferred.handle().send(ProcMessage::Ready(coro));
+        if let Some(mut current) = Processor::current() {
+            trace!("{:?}: pushing into local queue", coro);
+            current.ready(coro);
             return;
         }
 
-        if let Some(mut current) = current {
-            trace!("Coroutine `{}`: pushing into current queue",
-                   coro.debug_name());
-            return current.ready(coro);
-        }
-
         // Resume it right here
-        trace!("Coroutine `{}`: resuming without processor",
-               coro.debug_name());
+        warn!("{:?}: resuming without processor", coro);
         coro.resume(0);
     }
 
@@ -408,11 +477,8 @@ impl Scheduler {
                 let channel = self.event_loop_sender.as_ref().unwrap();
                 let mut msg = Message::Register(RegisterMessage::new(coro, cb));
 
-                loop {
-                    match channel.send(msg) {
-                        Err(NotifyError::Full(m)) => msg = m,
-                        _ => break,
-                    }
+                while let Err(NotifyError::Full(m)) = channel.send(msg) {
+                    msg = m;
                 }
             });
         }
@@ -482,17 +548,124 @@ impl Scheduler {
     }
 
     #[doc(hidden)]
-    pub fn park_processor(&self, id: usize, prochdl: ProcMessageSender) {
-        let mut parked = self.parked_processors.lock().unwrap();
-        parked.insert(id, prochdl);
+    pub fn get_machines(&'static self) -> &mut [Machine] {
+        unsafe { &mut *self.machines.get() }
     }
 
     #[doc(hidden)]
-    pub fn unpark_processor(&self, id: usize) {
-        let mut parked = self.parked_processors.lock().unwrap();
-        parked.remove(&id);
+    pub fn get_global_queue(&self) -> MutexGuard<HandleList> {
+        self.global_queue.lock().unwrap()
+    }
+
+    #[doc(hidden)]
+    pub fn push_global_queue(&self, hdl: Handle) {
+        let size = {
+            let mut queue = self.get_global_queue();
+            queue.push_back(hdl);
+            let size = queue.len();
+            self.set_global_queue_size(size);
+            size
+        };
+
+        self.unpark_processors_with_queue_size(size);
+    }
+
+    #[doc(hidden)]
+    pub fn push_global_queue_iter<T>(&self, iter: T)
+        where T: IntoIterator<Item = Handle>
+    {
+        let size = {
+            let mut queue = self.get_global_queue();
+            queue.extend(iter);
+            let size = queue.len();
+            self.set_global_queue_size(size);
+            size
+        };
+
+        self.unpark_processors_with_queue_size(size);
+    }
+
+    #[doc(hidden)]
+    pub fn append_io_handler_to_global_queue(&mut self) {
+        if !self.io_handler_queue.is_empty() {
+            let size = {
+                let mut queue = self.global_queue.lock().unwrap();
+                queue.append(&mut self.io_handler_queue);
+                let size = queue.len();
+                self.set_global_queue_size(size);
+                size
+            };
+
+            self.unpark_processors_with_queue_size(size);
+        }
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn global_queue_size(&self) -> usize {
+        self.global_queue_size.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn set_global_queue_size(&self, size: usize) {
+        self.global_queue_size.store(size, Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn inc_spinning(&self) {
+        self.spinning_processor_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn dec_spinning(&self) {
+        self.spinning_processor_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    pub fn park_processor(&self) {
+        self.idle_processor_count.fetch_add(1, Ordering::Relaxed);
+
+        {
+            let idle_processor_mutex = self.idle_processor_mutex.lock().unwrap();
+            let _ = self.idle_processor_condvar.wait(idle_processor_mutex);
+        }
+
+        self.idle_processor_count.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    pub fn unpark_processors_with_queue_size(&self, size: usize) {
+        self.unpark_processor_maybe(size / (processor::QUEUE_SIZE / 2) + 1);
+    }
+
+    #[doc(hidden)]
+    pub fn unpark_processor_maybe(&self, max: usize) {
+        let idle_processor_count = self.idle_processor_count.load(Ordering::Relaxed);
+
+        if max > 0 && idle_processor_count > 0 &&
+           self.spinning_processor_count.load(Ordering::Relaxed) == 0 {
+            let cnt = if idle_processor_count < max {
+                idle_processor_count
+            } else {
+                max
+            };
+
+            for _ in 0..cnt {
+                self.idle_processor_condvar.notify_one();
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn is_shutting_down(&self) -> bool {
+        self.is_shutting_down.load(Ordering::Relaxed)
     }
 }
+
+unsafe impl Send for Scheduler {}
 
 impl Handler for Scheduler {
     type Timeout = Token;
@@ -502,34 +675,27 @@ impl Handler for Scheduler {
         trace!("Handler: got {:?} for {:?}", events, token);
 
         let ready_states = self.slab.get(token.as_usize()).expect("Token must be registered");
+        let mut handles: [Handle; 4] = unsafe { mem::uninitialized() };
+        let handle_count = ready_states.notify(events, &mut handles);
 
-        if events.is_readable() {
-            ready_states.notify(ReadyType::Readable);
+        for hdl in &handles[..handle_count] {
+            trace!("Handler: got {:?}", hdl);
+            self.io_handler_queue.push_back(unsafe { mem::transmute_copy(hdl) });
         }
 
-        if events.is_writable() {
-            ready_states.notify(ReadyType::Writable);
-        }
-
-        if events.is_error() {
-            ready_states.notify(ReadyType::Error);
-        }
-
-        if events.is_hup() {
-            ready_states.notify(ReadyType::Hup);
-        }
+        mem::forget(handles);
     }
 
     fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, token: Token) {
         let coro = unsafe { Handle::from_raw(mem::transmute(token)) };
         trace!("Handler: timout for {:?}", coro);
-        Scheduler::ready(coro);
+        self.io_handler_queue.push_back(coro);
     }
 
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
         match msg {
-            Message::Register(msg) => {
-                trace!("Handler: registering for {:?}", msg.coro);
+            Message::Register(RegisterMessage { cb, coro }) => {
+                trace!("Handler: registering for {:?}", coro);
 
                 if self.slab.remaining() == 0 {
                     // doubles the size of the slab each time
@@ -541,16 +707,14 @@ impl Handler for Scheduler {
                     let token = unsafe { mem::transmute(token) };
                     let ready_states = ReadyStates::new();
 
-                    let ret = if (msg.cb)(event_loop, token, ready_states.clone()) {
+                    if (cb)(event_loop, token, ready_states.clone()) {
                         Some(ready_states)
                     } else {
                         None
-                    };
-
-                    Scheduler::ready(msg.coro);
-
-                    ret
+                    }
                 });
+
+                self.io_handler_queue.push_back(coro);
             }
             Message::Deregister(msg) => {
                 trace!("Handler: deregistering for {:?}", msg.coro);
@@ -558,7 +722,7 @@ impl Handler for Scheduler {
                 let _ = self.slab.remove(unsafe { mem::transmute(msg.token) });
 
                 (msg.cb)(event_loop);
-                Scheduler::ready(msg.coro);
+                self.io_handler_queue.push_back(msg.coro);
             }
             Message::Timer(msg) => {
                 trace!("Handler: adding timer for {:?}", msg.coro);
@@ -569,7 +733,7 @@ impl Handler for Scheduler {
 
                 if let Err(err) = event_loop.timeout_ms(token, msg.delay) {
                     *result = Err(err);
-                    Scheduler::ready(unsafe { Handle::from_raw(coro_ptr) });
+                    self.io_handler_queue.push_back(unsafe { Handle::from_raw(coro_ptr) });
                 }
             }
             Message::Shutdown => {

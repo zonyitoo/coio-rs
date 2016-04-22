@@ -20,15 +20,13 @@
 //  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 //  DEALINGS IN THE SOFTWARE.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::error::Error;
 use std::marker::Reflect;
 use std::ops::{Deref, DerefMut};
 
-use scheduler::Scheduler;
-use coroutine::Handle;
+use sync::semaphore::Semaphore;
 
 pub type LockResult<G> = Result<G, PoisonError<G>>;
 pub type TryLockResult<G> = Result<G, PoisonError<G>>;
@@ -36,9 +34,7 @@ pub type TryLockResult<G> = Result<G, PoisonError<G>>;
 /// A mutual exclusion primitive useful for protecting shared data
 pub struct Mutex<T> {
     data: UnsafeCell<T>,
-    lock: AtomicBool, // true if locked
-
-    wait_list: ::std::sync::Mutex<Vec<Handle>>,
+    sema: Semaphore,
 }
 
 impl<T> Mutex<T> {
@@ -46,39 +42,19 @@ impl<T> Mutex<T> {
     pub fn new(data: T) -> Mutex<T> {
         Mutex {
             data: UnsafeCell::new(data),
-            lock: AtomicBool::new(false),
-
-            // Uses Mutex in the standard library
-            wait_list: ::std::sync::Mutex::new(Vec::new()),
+            sema: Semaphore::new(1),
         }
     }
 
     /// Acquires a mutex, blocking the current thread until it is able to do so.
-    pub fn lock<'a>(&'a self) -> LockResult<Guard<'a, T>> {
-        // 1. Try to lock with the atomic boolean
-        while self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
-            // 2. Otherwise yield
-            Scheduler::park_with(|_, coro| {
-                // 3. Get the lock of wait list
-                let mut wait_list = self.wait_list.lock().unwrap();
-
-                // 4. Try again to ensure no one is releasing the lock while we
-                //    are trying to add ourselves into the wait list
-                if self.lock.compare_and_swap(false, true, Ordering::Acquire) == false {
-                    // 4.1. Wow, got the lock!
-                    Scheduler::ready(coro);
-                } else {
-                    // 4.2. Add ourselves into the wait list
-                    wait_list.push(coro);
-                }
-            });
-        }
-
+    pub fn lock(&self) -> LockResult<Guard<T>> {
+        self.sema.acquire();
         Ok(Guard::new(unsafe { &mut *self.data.get() }, self))
     }
 
-    pub fn try_lock<'a>(&'a self) -> TryLockResult<Guard<'a, T>> {
-        if self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
+    /// Try to acquire a mutex, will return immediately
+    pub fn try_lock(&self) -> TryLockResult<Guard<T>> {
+        if self.sema.try_acquire() {
             Err(PoisonError::new(Guard::new(unsafe { &mut *self.data.get() }, self)))
         } else {
             Ok(Guard::new(unsafe { &mut *self.data.get() }, self))
@@ -108,25 +84,21 @@ impl<'a, T: 'a> Guard<'a, T> {
 
 impl<'a, T: 'a> Drop for Guard<'a, T> {
     fn drop(&mut self) {
-        {
-            let mut wait_list = self.mutex.wait_list.lock().unwrap();
-            while let Some(coro) = wait_list.pop() {
-                Scheduler::ready(coro);
-            }
-        }
-
-        self.mutex.lock.store(false, Ordering::Release);
+        self.mutex.sema.release();
     }
 }
 
 impl<'a, T: 'a> Deref for Guard<'a, T> {
     type Target = T;
+
+    #[inline]
     fn deref(&self) -> &T {
         self.data
     }
 }
 
 impl<'a, T: 'a> DerefMut for Guard<'a, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.data
     }
@@ -135,7 +107,7 @@ impl<'a, T: 'a> DerefMut for Guard<'a, T> {
 /// A type of error which can be returned whenever a lock is acquired.
 ///
 /// Currently this error does not act just like the
-/// [PoisonError](rust:#std::sync::PoisonError) does.
+/// [`PoisonError`](rust:#std::sync::PoisonError) does.
 pub struct PoisonError<T> {
     guard: T,
 }
@@ -145,14 +117,17 @@ impl<T> PoisonError<T> {
         PoisonError { guard: guard }
     }
 
+    #[inline]
     pub fn into_inner(self) -> T {
         self.guard
     }
 
+    #[inline]
     pub fn get_ref(&self) -> &T {
         &self.guard
     }
 
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.guard
     }

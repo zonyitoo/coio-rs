@@ -43,20 +43,21 @@ func main() {
 				l := len(msg)
 				recv := make([]byte, l)
 
+			outer:
 				for {
 					for rest := l; rest > 0; {
 						i, err := conn.Write(msg)
 						rest -= i
 						if err != nil {
 							log.Println(err)
-							break
+							break outer
 						}
 					}
 
 					atomic.AddUint64(&outNum, 1)
 
 					if atomic.LoadUint64(&stop) == 1 {
-						break
+						break outer
 					}
 
 					for rest := l; rest > 0; {
@@ -64,14 +65,14 @@ func main() {
 						rest -= i
 						if err != nil {
 							log.Println(err)
-							break
+							break outer
 						}
 					}
 
 					atomic.AddUint64(&inNum, 1)
 
 					if atomic.LoadUint64(&stop) == 1 {
-						break
+						break outer
 					}
 				}
 			} else {

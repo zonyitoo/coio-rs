@@ -187,7 +187,7 @@ fn main() {
     let matches = App::new("mio-tcp-echo")
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Y. T. Chung <zonyitoo@gmail.com>")
-                      .arg(Arg::with_name("BIND")
+                      .arg(Arg::with_name("bind")
                                .short("b")
                                .long("bind")
                                .takes_value(true)
@@ -195,7 +195,7 @@ fn main() {
                                .help("Listening on this address"))
                       .get_matches();
 
-    let addr_str = matches.value_of("BIND").unwrap();
+    let addr_str = matches.value_of("bind").unwrap();
     let addr: SocketAddr = addr_str.parse().unwrap();
 
     debug!("Starting TEST_ECHO_SERVER");

@@ -24,6 +24,8 @@
 
 pub use self::mutex::Mutex;
 
-pub mod mutex;
-pub mod mpsc;
 pub mod mono_barrier;
+pub mod mpsc;
+pub mod mutex;
+pub mod semaphore;
+pub mod spinlock;

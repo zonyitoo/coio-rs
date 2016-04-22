@@ -24,9 +24,13 @@
 
 #![feature(
     arc_counts,
+    asm,
+    extended_compare_and_swap,
     fnbox,
+    optin_builtin_traits,
     panic_handler,
     reflect_marker,
+    shared,
 )]
 
 #[macro_use]
@@ -53,9 +57,10 @@ pub use scheduler::{Scheduler, JoinHandle};
 mod coroutine;
 mod runtime;
 
-use std::panic;
 use std::thread;
 use std::time::Duration;
+
+#[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 
 /// Spawn a new Coroutine
@@ -164,19 +169,8 @@ fn global_work_count_add() {}
 
 #[inline]
 #[cfg(not(debug_assertions))]
-fn global_work_count_sub() {}
-
-#[inline]
-#[cfg(not(debug_assertions))]
 fn global_work_count_get() -> usize {
     0
-}
-
-unsafe fn try<R, F: FnOnce() -> R>(f: F) -> thread::Result<R> {
-    let mut f = Some(f);
-    let f = &mut f as *mut Option<F> as usize;
-
-    panic::catch_unwind(move || (*(f as *mut Option<F>)).take().unwrap()())
 }
 
 

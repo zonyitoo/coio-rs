@@ -41,14 +41,12 @@ pub type UdpSocket = GenericEvented<MioUdpSocket>;
 
 impl UdpSocket {
     /// Returns a new, unbound, non-blocking, IPv4 UDP socket
-    #[inline]
     pub fn v4() -> io::Result<UdpSocket> {
         let inner = try!(MioUdpSocket::v4());
         create_udp_socket!(inner)
     }
 
     /// Returns a new, unbound, non-blocking, IPv6 UDP socket
-    #[inline]
     pub fn v6() -> io::Result<UdpSocket> {
         let inner = try!(MioUdpSocket::v6());
         create_udp_socket!(inner)

@@ -25,7 +25,7 @@ func main() {
 					break
 				}
 
-				len, err = client.Write(buf[0:len])
+				_, err = client.Write(buf[0:len])
 				if err != nil {
 					break
 				}

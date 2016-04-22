@@ -22,3 +22,4 @@
 pub use self::processor::Processor;
 
 pub mod processor;
+pub mod stack_pool;

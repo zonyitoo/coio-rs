@@ -7,8 +7,15 @@ authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
 bytes = "0.3"
 clap = "2.1"
 #hyper = "*"
-log = "0.3"
 mio = "0.5"
+mioco = "0.4"
+
+[dependencies.log]
+version = "0.3"
+features = ["release_max_level_info"]
+
+[dependencies.coio]
+path = "../"
 
 #[[bin]]
 #name = "coio-http-echo-server"
@@ -20,7 +27,10 @@ name = "coio-tcp-echo-server"
 name = "mio-tcp-echo-server"
 
 [[bin]]
+name = "mioco-tcp-echo-server"
+
+[[bin]]
 name = "threaded-tcp-echo-server"
 
-[dependencies.coio]
-path = "../"
+[[bin]]
+name = "coio-cheated-http-echo-server"
