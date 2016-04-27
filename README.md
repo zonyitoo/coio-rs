@@ -1,6 +1,7 @@
 # Coroutine I/O
 
 [![Build Status](https://travis-ci.org/zonyitoo/coio-rs.svg?branch=master)](https://travis-ci.org/zonyitoo/coio-rs)
+[![Build status](https://ci.appveyor.com/api/projects/status/6c3j6thrij9ow0n4?svg=true)](https://ci.appveyor.com/project/zonyitoo/coio-rs)
 
 Coroutine scheduling with work-stealing algorithm.
 
@@ -11,6 +12,8 @@ Coroutine scheduling with work-stealing algorithm.
 * Asynchronous computing APIs
 
 ## Usage
+
+Note: You must use [Nightly Rust](https://doc.rust-lang.org/book/nightly-rust.html) to build this Project.
 
 ```toml
 [dependencies.coio]
@@ -29,7 +32,7 @@ fn main() {
         .run(|| {
             for _ in 0..10 {
                 println!("Heil Hydra");
-                Scheduler::sched();
+                Scheduler::sched(); // Yields the current coroutine
             }
         })
         .unwrap();
@@ -85,15 +88,16 @@ fn main() {
 }
 ```
 
-## Exit the main function
+### Exit the main function
 
-Will cause all pending coroutine to be killed.
+Will cause all pending coroutines to be killed.
 
 ```rust
 extern crate coio;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use coio::Scheduler;
 
@@ -112,9 +116,10 @@ fn main() {
                 }
             }
 
+            // If the _guard is dropped, it will store 1 to the counter
             let _guard = Guard(cloned_counter);
 
-            coio::sleep_ms(10_000);
+            coio::sleep(Duration::from_secs(10));
             println!("Not going to run this line");
         });
 
@@ -122,10 +127,15 @@ fn main() {
         panic!("Exit right now!!");
     });
 
+    // The coroutine's stack is unwound properly
     assert!(result.is_err() && counter.load(Ordering::SeqCst) == 1);
 }
 ```
 
 ## Basic Benchmarks
 
-See `benchmarks` for more details.
+See [benchmarks](benchmarks) for more details.
+
+## Projects using coio
+
+* [shadowsocks-rust](https://github.com/zonyitoo/shadowsocks-rust) - shadowsocks is a fast tunnel proxy that helps you bypass firewalls.
