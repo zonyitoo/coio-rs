@@ -90,7 +90,6 @@ impl Waiter {
 
     pub fn try_wait(&self, coro: Handle) -> Option<Handle> {
         let mut state = self.state.lock();
-        println!("TRY WAIT");
         match state.0 {
             WaiterState::Empty => {
                 state.1 = Some(coro);
