@@ -103,7 +103,7 @@ impl UnixListener {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.accept() {
+            match self.get_inner().accept() {
                 Ok(None) => {
                     trace!("UnixListener({:?}): accept() => WouldBlock", self.token);
                 }
@@ -124,7 +124,7 @@ impl UnixListener {
     }
 
     pub fn try_clone(&self) -> io::Result<UnixListener> {
-        let inner = try!(self.inner.try_clone());
+        let inner = try!(self.get_inner().try_clone());
         create_unix_listener!(inner)
     }
 }
@@ -145,7 +145,7 @@ impl UnixStream {
     }
 
     pub fn try_clone(&self) -> io::Result<UnixStream> {
-        let inner = try!(self.inner.try_clone());
+        let inner = try!(self.get_inner().try_clone());
         create_unix_stream!(inner)
     }
 }

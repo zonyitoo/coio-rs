@@ -58,7 +58,7 @@ impl TcpListener {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.accept() {
+            match self.get_inner().accept() {
                 Ok(None) => {
                     trace!("TcpListener({:?}): accept() => WouldBlock", self.token);
                 }
@@ -79,7 +79,7 @@ impl TcpListener {
     }
 
     pub fn try_clone(&self) -> io::Result<TcpListener> {
-        let inner = try!(self.inner.try_clone());
+        let inner = try!(self.get_inner().try_clone());
         create_tcp_listener!(inner)
     }
 
@@ -118,7 +118,7 @@ impl TcpStream {
     }
 
     pub fn try_clone(&self) -> io::Result<TcpStream> {
-        let inner = try!(self.inner.try_clone());
+        let inner = try!(self.get_inner().try_clone());
         create_tcp_stream!(inner)
     }
 }

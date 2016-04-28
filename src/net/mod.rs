@@ -38,6 +38,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::{Deref, DerefMut};
 use std::time::Duration;
+use std::cell::UnsafeCell;
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -63,7 +64,7 @@ fn make_timeout() -> io::Error {
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct GenericEvented<E: Evented + Debug> {
-    inner: E,
+    inner: UnsafeCell<E>,
     ready_states: ReadyStates,
     token: Token,
 
@@ -78,7 +79,7 @@ impl<E: Evented + Debug> GenericEvented<E> {
         let (token, ready_states) = try!(scheduler.register(&inner, interest));
 
         Ok(GenericEvented {
-            inner: inner,
+            inner: UnsafeCell::new(inner),
             ready_states: ready_states,
             token: token,
 
@@ -86,12 +87,22 @@ impl<E: Evented + Debug> GenericEvented<E> {
             write_timeout: Spinlock::default(),
         })
     }
+
+    #[inline]
+    fn get_inner_mut(&self) -> &mut E {
+        unsafe { &mut *self.inner.get() }
+    }
+
+    #[inline]
+    fn get_inner(&self) -> &E {
+        unsafe { &*self.inner.get() }
+    }
 }
 
 impl<E: Evented + Debug> Drop for GenericEvented<E> {
     fn drop(&mut self) {
         let scheduler = Scheduler::instance().unwrap();
-        scheduler.deregister(&self.inner, self.token).unwrap();
+        scheduler.deregister(self.get_inner(), self.token).unwrap();
     }
 }
 
@@ -99,13 +110,13 @@ impl<E: Evented + Debug> Deref for GenericEvented<E> {
     type Target = E;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.get_inner()
     }
 }
 
 impl<E: Evented + Debug> DerefMut for GenericEvented<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.get_inner_mut()
     }
 }
 
@@ -140,7 +151,7 @@ impl<E: Evented + Debug + Read> Read for GenericEvented<E> {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.read(buf) {
+            match self.get_inner_mut().read(buf) {
                 Ok(len) => {
                     trace!("GenericEvented({:?}): read() => Ok({})", self.token, len);
                     return Ok(len);
@@ -182,7 +193,7 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.write(buf) {
+            match self.get_inner_mut().write(buf) {
                 Ok(len) => {
                     trace!("GenericEvented({:?}): write() => Ok({})", self.token, len);
                     return Ok(len);
@@ -220,7 +231,7 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.flush() {
+            match self.get_inner_mut().flush() {
                 Ok(()) => {
                     trace!("GenericEvented({:?}): write() => Ok(())", self.token);
                     return Ok(());
@@ -258,10 +269,132 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
 #[cfg(unix)]
 impl<E: Evented + Debug + AsRawFd> AsRawFd for GenericEvented<E> {
     fn as_raw_fd(&self) -> RawFd {
-        self.inner.as_raw_fd()
+        self.get_inner().as_raw_fd()
     }
 }
 
+impl<'a, E: Evented + Debug + Read + 'a> Read for &'a GenericEvented<E> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner_mut().read(buf) {
+                Ok(len) => {
+                    trace!("GenericEvented({:?}): read() => Ok({})", self.token, len);
+                    return Ok(len);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    trace!("GenericEvented({:?}): read() => WouldBlock", self.token);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): read() => NotConnected", self.token);
+                }
+                Err(err) => {
+                    trace!("GenericEvented({:?}): read() => Err(..)", self.token);
+                    return Err(err);
+                }
+            }
+
+            trace!("GenericEvented({:?}): wait(Readable)", self.token);
+
+            let state = match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Readable, t),
+            };
+
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {},
+            }
+
+            sync_guard.disarm();
+        }
+    }
+}
+
+impl<'a, E: Evented + Debug + Write + 'a> Write for &'a GenericEvented<E> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner_mut().write(buf) {
+                Ok(len) => {
+                    trace!("GenericEvented({:?}): write() => Ok({})", self.token, len);
+                    return Ok(len);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    trace!("GenericEvented({:?}): write() => WouldBlock", self.token);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): write() => NotConnected", self.token);
+                }
+                Err(err) => {
+                    trace!("GenericEvented({:?}): write() => Err(..)", self.token);
+                    return Err(err);
+                }
+            }
+
+            trace!("GenericEvented({:?}): wait(Writable)", self.token);
+            let state = match *self.write_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
+            };
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {}
+            }
+
+            sync_guard.disarm();
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner_mut().flush() {
+                Ok(()) => {
+                    trace!("GenericEvented({:?}): write() => Ok(())", self.token);
+                    return Ok(());
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    trace!("GenericEvented({:?}): flush() => WouldBlock", self.token);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
+                    trace!("GenericEvented({:?}): flush() => NotConnected", self.token);
+                }
+                Err(err) => {
+                    trace!("GenericEvented({:?}): flush() => Err(..)", self.token);
+                    return Err(err);
+                }
+            }
+
+            trace!("GenericEvented({:?}): wait(Writable)", self.token);
+            let state = match *self.write_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
+            };
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {},
+            }
+
+            sync_guard.disarm();
+        }
+    }
+}
+
+unsafe impl<E: Evented + Debug> Send for GenericEvented<E> {}
+unsafe impl<E: Evented + Debug> Sync for GenericEvented<E> {}
 
 struct SyncGuard(bool);
 

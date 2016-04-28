@@ -66,7 +66,7 @@ impl UdpSocket {
     }
 
     pub fn try_clone(&self) -> io::Result<UdpSocket> {
-        let inner = try!(self.inner.try_clone());
+        let inner = try!(self.get_inner().try_clone());
         create_udp_socket!(inner)
     }
 
@@ -74,7 +74,7 @@ impl UdpSocket {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.send_to(buf, target) {
+            match self.get_inner_mut().send_to(buf, target) {
                 Ok(None) => {
                     trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
                 }
@@ -98,7 +98,7 @@ impl UdpSocket {
         let mut sync_guard = SyncGuard::new();
 
         loop {
-            match self.inner.recv_from(buf) {
+            match self.get_inner_mut().recv_from(buf) {
                 Ok(None) => {
                     trace!("UdpSocket({:?}): recv_from() => WouldBlock", self.token);
                 }
