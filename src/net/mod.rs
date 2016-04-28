@@ -37,6 +37,7 @@ use std::fmt::Debug;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::{Deref, DerefMut};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -44,7 +45,20 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use mio::{Evented, EventSet, Token};
 
 use scheduler::{ReadyStates, ReadyType, Scheduler};
+use sync::spinlock::Spinlock;
+use runtime::notifier::WaiterState;
 
+#[cfg(unix)]
+fn make_timeout() -> io::Error {
+    use libc;
+    io::Error::from_raw_os_error(libc::ETIMEDOUT)
+}
+
+#[cfg(windows)]
+fn make_timeout() -> io::Error {
+    const WSAETIMEDOUT: u32 = 10060;
+    io::Error::from_raw_os_error(WSAETIMEDOUT)
+}
 
 #[derive(Debug)]
 #[doc(hidden)]
@@ -52,6 +66,9 @@ pub struct GenericEvented<E: Evented + Debug> {
     inner: E,
     ready_states: ReadyStates,
     token: Token,
+
+    read_timeout: Spinlock<Option<Duration>>,
+    write_timeout: Spinlock<Option<Duration>>,
 }
 
 impl<E: Evented + Debug> GenericEvented<E> {
@@ -64,6 +81,9 @@ impl<E: Evented + Debug> GenericEvented<E> {
             inner: inner,
             ready_states: ready_states,
             token: token,
+
+            read_timeout: Spinlock::default(),
+            write_timeout: Spinlock::default(),
         })
     }
 }
@@ -86,6 +106,32 @@ impl<E: Evented + Debug> Deref for GenericEvented<E> {
 impl<E: Evented + Debug> DerefMut for GenericEvented<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+impl<E: Evented + Debug + Read> GenericEvented<E> {
+    #[inline]
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.read_timeout.lock() = dur;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*self.read_timeout.lock())
+    }
+}
+
+impl<E: Evented + Debug + Write> GenericEvented<E> {
+    #[inline]
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.write_timeout.lock() = dur;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*self.write_timeout.lock())
     }
 }
 
@@ -112,7 +158,20 @@ impl<E: Evented + Debug + Read> Read for GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Readable)", self.token);
-            self.ready_states.wait(ReadyType::Readable);
+
+            let state = match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Readable, t),
+            };
+
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {},
+            }
+
             sync_guard.disarm();
         }
     }
@@ -141,7 +200,18 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
-            self.ready_states.wait(ReadyType::Writable);
+            let state = match *self.write_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
+            };
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {}
+            }
+
             sync_guard.disarm();
         }
     }
@@ -168,7 +238,18 @@ impl<E: Evented + Debug + Write> Write for GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
-            self.ready_states.wait(ReadyType::Writable);
+            let state = match *self.write_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
+            };
+            match state {
+                WaiterState::Error => {
+                    // TODO: How to deal with error?
+                }
+                WaiterState::Timedout => return Err(make_timeout()),
+                _ => {},
+            }
+
             sync_guard.disarm();
         }
     }

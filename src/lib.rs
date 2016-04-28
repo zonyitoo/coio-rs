@@ -43,6 +43,7 @@ extern crate rand;
 extern crate slab;
 extern crate linked_hash_map;
 extern crate time;
+extern crate libc;
 
 pub mod join_handle;
 pub mod net;

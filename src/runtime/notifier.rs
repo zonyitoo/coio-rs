@@ -235,7 +235,7 @@ impl Notifier {
     }
 
     pub fn notify_all(&self, t: WaiterState, hdl_list: &mut HandleList) {
-        let mut count = 0usize;
+        let mut count = 1usize;
         let mut lst = self.wait_list.lock();
         while let Some(waiter) = lst.pop() {
             let waiter = unsafe { &mut **waiter };
@@ -248,10 +248,6 @@ impl Notifier {
                 hdl_list.push_back(hdl);
             }
 
-            count += 1;
-        }
-
-        if count == 0 {
             count += 1;
         }
 

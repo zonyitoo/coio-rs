@@ -158,6 +158,11 @@ impl ReadyStates {
     }
 
     #[inline]
+    pub fn wait_timeout(&self, ready_type: ReadyType, dur: Duration) -> WaiterState {
+        self.0[ready_type as usize].wait_timeout(dur).unwrap()
+    }
+
+    #[inline]
     fn notify(&self, event_set: EventSet, handles: &mut HandleList) {
         if event_set.contains(EventSet::readable()) {
             self.0[ReadyType::Readable as usize].notify_all(WaiterState::Succeeded, handles);

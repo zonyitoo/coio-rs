@@ -23,6 +23,7 @@ rand = "0.3"
 slab = { git = "https://github.com/carllerche/slab.git", rev = "44f9f41a1680e69db7d370d1912898fb0f90b1f8" }
 linked-hash-map = "0.0.9"
 time = "0.1"
+libc = "0.2"
 
 [dependencies.log]
 version = "0.3"
