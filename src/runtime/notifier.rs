@@ -45,30 +45,42 @@ impl Default for WaiterState {
     }
 }
 
+// NOTE: This Waiter will always be allocated on the stack. It can be referenced by:
+//
+//  1. Notifier's WaiterList
+//  2. Timer's TimerWaitType::Waiter
+//
+//  So you have to ensure that all the raw pointer references to this struct has been removed before
+//  you drop the struct.
 pub struct Waiter {
+    // Not Sync part
     prev: Option<Shared<Waiter>>,
     next: Option<Shared<Waiter>>,
     notifier: Option<*const Notifier>,
     timeout: Option<Timeout>,
 
+    // Sync part
+    // These fields can be called from multiple threads
     state: Spinlock<(WaiterState, Option<Handle>)>,
 }
 
 impl Waiter {
-    pub fn new(notifier: &Notifier) -> Waiter {
-        let mut waiter = Waiter {
+    pub fn new() -> Waiter {
+        Waiter {
             prev: None,
             next: None,
-            notifier: Some(notifier as *const _),
+            notifier: None,
             timeout: None,
 
             state: Spinlock::default(),
-        };
+        }
+    }
 
+    pub fn bind(&mut self, notifier: &Notifier) {
+        debug_assert!(self.notifier.is_none(), "Waiter is already binded");
         let mut lst = notifier.wait_list.lock();
-        lst.push(&mut waiter);
-
-        waiter
+        lst.push(self);
+        self.notifier = Some(notifier as *const _);
     }
 
     #[must_use]
@@ -106,18 +118,27 @@ impl Waiter {
     pub fn take_timeout(&mut self) -> Option<Timeout> {
         self.timeout.take()
     }
-}
 
-impl Drop for Waiter {
-    fn drop(&mut self) {
+    unsafe fn unbind(&mut self) {
         match self.notifier {
             None => {}
             Some(noti) => {
                 // Force remove
-                let noti = unsafe { &*noti };
+                let noti = &*noti;
                 let mut lst = noti.wait_list.lock();
                 lst.remove(self);
             }
+        }
+    }
+}
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        unsafe { self.unbind(); }
+
+        if let Some(timeout) = self.timeout.take() {
+            let p = Processor::current().expect("Notifier is dropping outside of a Processor");
+            p.scheduler().cancel_timeout(timeout);
         }
     }
 }
@@ -186,6 +207,12 @@ impl Default for WaiterList {
     }
 }
 
+impl Drop for WaiterList {
+    fn drop(&mut self) {
+        while let Some(_) = self.pop() {}
+    }
+}
+
 pub struct Notifier {
     token: AtomicUsize,
     notified: AtomicUsize,
@@ -242,7 +269,8 @@ impl Notifier {
             return WaiterState::Succeeded;
         }
 
-        let waiter = Waiter::new(self);
+        let mut waiter = Waiter::new();
+        waiter.bind(self);
         p.park_with(|p, coro| {
             if let Some(coro) = waiter.try_wait(coro) {
                 p.ready(coro);
@@ -254,12 +282,13 @@ impl Notifier {
     pub fn wait_timeout(&self, dur: Duration) -> Result<WaiterState, TimerError> {
         let p = Processor::current().expect("Notifier::wait should be run in a Coroutine");
 
-        let mut waiter = Waiter::new(self);
+        let mut waiter = Waiter::new();
 
         let wait_ms = ::duration_to_ms(dur);
         let timeout = try!(p.scheduler().timeout(wait_ms, &mut waiter));
         waiter.set_timeout(timeout);
 
+        waiter.bind(self);
         p.park_with(|p, coro| {
             if let Some(coro) = waiter.try_wait(coro) {
                 p.ready(coro);
@@ -299,3 +328,10 @@ impl fmt::Debug for Notifier {
 
 unsafe impl Send for Notifier {}
 unsafe impl Sync for Notifier {}
+
+impl Drop for Notifier {
+    fn drop(&mut self) {
+        let mut lst = self.wait_list.lock();
+        while let Some(_) = lst.pop() {}
+    }
+}
