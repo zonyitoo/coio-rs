@@ -28,7 +28,7 @@ use std::fmt;
 use sync::spinlock::Spinlock;
 use coroutine::{Handle, HandleList};
 use runtime::processor::Processor;
-use runtime::timer::{Timeout, TimerError};
+use runtime::timer::Timeout;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -140,7 +140,9 @@ impl Waiter {
 
 impl Drop for Waiter {
     fn drop(&mut self) {
-        unsafe { self.unbind(); }
+        unsafe {
+            self.unbind();
+        }
 
         if let Some(timeout) = self.timeout.take() {
             let p = Processor::current().expect("Notifier is dropping outside of a Processor");
@@ -302,7 +304,7 @@ impl Notifier {
         }
     }
 
-    pub fn wait_timeout(&self, dur: Duration) -> Result<WaiterState, TimerError> {
+    pub fn wait_timeout(&self, dur: Duration) -> WaiterState {
         let p = Processor::current().expect("Notifier::wait should be run in a Coroutine");
 
         // Short path
@@ -310,13 +312,13 @@ impl Notifier {
         let notified = self.notified.load(Ordering::SeqCst);
         if token < notified {
             trace!("Already notified for token {}, no need to wait", token);
-            return Ok(WaiterState::Succeeded);
+            return WaiterState::Succeeded;
         }
 
         let mut waiter = Waiter::new();
 
         let wait_ms = ::duration_to_ms(dur);
-        let timeout = try!(p.scheduler().timeout(wait_ms, &mut waiter));
+        let timeout = p.scheduler().timeout(wait_ms, &mut waiter);
         waiter.set_timeout(timeout);
 
         p.park_with(|p, coro| {
@@ -349,7 +351,7 @@ impl Notifier {
             WaiterState::Timedout => {}
             _ => panic!("Waiter is waken up with invalid state"),
         }
-        Ok(state)
+        state
     }
 }
 

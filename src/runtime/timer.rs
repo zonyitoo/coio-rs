@@ -1,9 +1,6 @@
-use time::precise_time_ns;
-
-use std::{error, fmt, usize, iter};
+use std::usize;
 use std::cmp::max;
-
-use self::TimerErrorKind::TimerOverflow;
+use time::precise_time_ns;
 
 const EMPTY: usize = usize::MAX;
 const NS_PER_MS: u64 = 1_000_000;
@@ -47,19 +44,20 @@ pub struct Timeout {
 type Slab<T> = ::slab::Slab<T, Token>;
 
 impl<T> Timer<T> {
-    pub fn new(tick_ms: u64, mut slots: usize, mut capacity: usize) -> Timer<T> {
-        slots = slots.next_power_of_two();
-        capacity = capacity.next_power_of_two();
-
-        Timer {
+    pub fn new(tick_ms: u64, slots: usize, capacity: usize) -> Timer<T> {
+        let mut timer = Timer {
             tick_ms: tick_ms,
-            entries: Slab::new(capacity),
-            wheel: iter::repeat(EMPTY).take(slots).collect(),
+            entries: Slab::new(capacity.next_power_of_two()),
+            wheel: Vec::new(),
             start: 0,
             tick: 0,
             next: EMPTY,
-            mask: (slots as u64) - 1
-        }
+            mask: (slots as u64) - 1,
+        };
+
+        timer.wheel.resize(slots.next_power_of_two(), EMPTY);
+
+        timer
     }
 
     #[allow(dead_code)]
@@ -84,11 +82,7 @@ impl<T> Timer<T> {
         Some(nxt - now)
     }
 
-    /*
-     *
-     * ===== Initialization =====
-     *
-     */
+    // ===== Initialization =====
 
     // Sets the starting time of the timer using the current system time
     pub fn setup(&mut self) {
@@ -101,18 +95,14 @@ impl<T> Timer<T> {
         self.start = start;
     }
 
-    /*
-     *
-     * ===== Timeout create / cancel =====
-     *
-     */
+    // ===== Timeout create / cancel =====
 
-    pub fn timeout_ms(&mut self, token: T, delay: u64) -> TimerResult<Timeout> {
+    pub fn timeout_ms(&mut self, token: T, delay: u64) -> Timeout {
         let at = self.now_ms() + max(0, delay);
         self.timeout_at_ms(token, at)
     }
 
-    pub fn timeout_at_ms(&mut self, token: T, mut at: u64) -> TimerResult<Timeout> {
+    pub fn timeout_at_ms(&mut self, token: T, mut at: u64) -> Timeout {
         // Make relative to start
         at -= self.start;
         // Calculate tick
@@ -129,7 +119,7 @@ impl<T> Timer<T> {
     pub fn clear(&mut self, timeout: &Timeout) -> bool {
         let links = match self.entries.get(timeout.token) {
             Some(e) => e.links,
-            None => return false
+            None => return false,
         };
 
         // Sanity check
@@ -142,15 +132,21 @@ impl<T> Timer<T> {
         true
     }
 
-    fn insert(&mut self, token: T, tick: u64) -> TimerResult<Timeout> {
+    fn insert(&mut self, token: T, tick: u64) -> Timeout {
         // Get the slot for the requested tick
         let slot = (tick & self.mask) as usize;
         let curr = self.wheel[slot];
 
+        if !self.entries.has_remaining() {
+            let grow_by = self.entries.count() >> 1;
+            self.entries.grow(grow_by);
+        }
+
         // Insert the new entry
-        let token = try!(
-            self.entries.insert(Entry::new(token, tick, curr))
-            .map_err(|_| TimerError::overflow()));
+        let token = match self.entries.insert(Entry::new(token, tick, curr)) {
+            Ok(token) => token,
+            Err(..) => panic!("slab should not be full"),
+        };
 
         if curr != EMPTY {
             // If there was a previous entry, set its prev pointer to the new
@@ -164,15 +160,16 @@ impl<T> Timer<T> {
         trace!("inserted timout; slot={}; token={:?}", slot, token);
 
         // Return the new timeout
-        Ok(Timeout {
+        Timeout {
             token: token,
-            tick: tick
-        })
+            tick: tick,
+        }
     }
 
     fn unlink(&mut self, links: &EntryLinks, token: Token) {
-       trace!("unlinking timeout; slot={}; token={:?}",
-               self.slot_for(links.tick), token);
+        trace!("unlinking timeout; slot={}; token={:?}",
+               self.slot_for(links.tick),
+               token);
 
         if links.prev == EMPTY {
             let slot = self.slot_for(links.tick);
@@ -192,11 +189,7 @@ impl<T> Timer<T> {
         }
     }
 
-    /*
-     *
-     * ===== Advance time =====
-     *
-     */
+    // ===== Advance time =====
 
     pub fn now(&self) -> u64 {
         self.ms_to_tick(self.now_ms())
@@ -223,8 +216,9 @@ impl<T> Timer<T> {
                     self.unlink(&links, curr);
 
                     // Remove and return the token
-                    return self.entries.remove(curr)
-                        .map(|e| e.token);
+                    return self.entries
+                               .remove(curr)
+                               .map(|e| e.token);
                 } else {
                     self.next = links.next;
                 }
@@ -234,11 +228,7 @@ impl<T> Timer<T> {
         None
     }
 
-    /*
-     *
-     * ===== Misc =====
-     *
-     */
+    // ===== Misc =====
 
     // Timers are initialized when either the current time has been advanced or a timeout has been set
     #[inline]
@@ -287,49 +277,7 @@ impl<T> Entry<T> {
 struct EntryLinks {
     tick: u64,
     prev: Token,
-    next: Token
-}
-
-pub type TimerResult<T> = Result<T, TimerError>;
-
-#[derive(Debug)]
-pub struct TimerError {
-    kind: TimerErrorKind,
-    desc: &'static str,
-}
-
-impl fmt::Display for TimerError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}: {}", self.kind, self.desc)
-    }
-}
-
-impl TimerError {
-    fn overflow() -> TimerError {
-        TimerError {
-            kind: TimerOverflow,
-            desc: "too many timer entries"
-        }
-    }
-}
-
-impl error::Error for TimerError {
-    fn description(&self) -> &str {
-        self.desc
-    }
-}
-
-#[derive(Debug)]
-pub enum TimerErrorKind {
-    TimerOverflow,
-}
-
-impl fmt::Display for TimerErrorKind {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            TimerOverflow => write!(fmt, "TimerOverflow"),
-        }
-    }
+    next: Token,
 }
 
 #[cfg(test)]
@@ -341,7 +289,7 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        t.timeout_at_ms("a", 100).unwrap();
+        t.timeout_at_ms("a", 100);
 
         tick = t.ms_to_tick(50);
         assert_eq!(None, t.tick_to(tick));
@@ -364,7 +312,7 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        let to = t.timeout_at_ms("a", 100).unwrap();
+        let to = t.timeout_at_ms("a", 100);
         assert!(t.clear(&to));
 
         tick = t.ms_to_tick(100);
@@ -381,19 +329,19 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        t.timeout_at_ms("a", 100).unwrap();
-        t.timeout_at_ms("b", 100).unwrap();
+        t.timeout_at_ms("a", 100);
+        t.timeout_at_ms("b", 100);
 
         let mut rcv = vec![];
 
         tick = t.ms_to_tick(100);
-        rcv.push(t.tick_to(tick).unwrap());
-        rcv.push(t.tick_to(tick).unwrap());
+        rcv.push(t.tick_to(tick));
+        rcv.push(t.tick_to(tick));
 
         assert_eq!(None, t.tick_to(tick));
 
         rcv.sort();
-        assert!(rcv == ["a", "b"], "actual={:?}", rcv);
+        assert!(rcv == [Some("a"), Some("b")], "actual={:?}", rcv);
 
         tick = t.ms_to_tick(200);
         assert_eq!(None, t.tick_to(tick));
@@ -406,10 +354,10 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        t.timeout_at_ms("a", 110).unwrap();
-        t.timeout_at_ms("b", 220).unwrap();
-        t.timeout_at_ms("c", 230).unwrap();
-        t.timeout_at_ms("d", 440).unwrap();
+        t.timeout_at_ms("a", 110);
+        t.timeout_at_ms("b", 220);
+        t.timeout_at_ms("c", 230);
+        t.timeout_at_ms("d", 440);
 
         tick = t.ms_to_tick(100);
         assert_eq!(None, t.tick_to(tick));
@@ -438,10 +386,10 @@ mod test {
     pub fn test_catching_up() {
         let mut t = timer();
 
-        t.timeout_at_ms("a", 110).unwrap();
-        t.timeout_at_ms("b", 220).unwrap();
-        t.timeout_at_ms("c", 230).unwrap();
-        t.timeout_at_ms("d", 440).unwrap();
+        t.timeout_at_ms("a", 110);
+        t.timeout_at_ms("b", 220);
+        t.timeout_at_ms("c", 230);
+        t.timeout_at_ms("d", 440);
 
         let tick = t.ms_to_tick(600);
         assert_eq!(Some("a"), t.tick_to(tick));
@@ -456,8 +404,8 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        t.timeout_at_ms("a", 100).unwrap();
-        t.timeout_at_ms("b", 100 + TICK * SLOTS as u64).unwrap();
+        t.timeout_at_ms("a", 100);
+        t.timeout_at_ms("b", 100 + TICK * SLOTS as u64);
 
         tick = t.ms_to_tick(100);
         assert_eq!(Some("a"), t.tick_to(tick));
@@ -477,9 +425,9 @@ mod test {
         let mut t = timer();
         let mut tick;
 
-        let a = t.timeout_at_ms("a", 100).unwrap();
-        let _ = t.timeout_at_ms("b", 100).unwrap();
-        let _ = t.timeout_at_ms("c", 200).unwrap();
+        let a = t.timeout_at_ms("a", 100);
+        let _ = t.timeout_at_ms("b", 100);
+        let _ = t.timeout_at_ms("c", 200);
 
         tick = t.ms_to_tick(100);
         assert_eq!(Some("b"), t.tick_to(tick));

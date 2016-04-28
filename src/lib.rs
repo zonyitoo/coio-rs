@@ -99,7 +99,7 @@ pub fn sleep_ms(ms: u64) {
 #[inline]
 pub fn sleep(dur: Duration) {
     match Scheduler::instance() {
-        Some(s) => s.sleep(dur).unwrap(),
+        Some(s) => s.sleep(dur),
         None => thread::sleep(dur),
     }
 }

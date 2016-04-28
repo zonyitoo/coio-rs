@@ -401,11 +401,11 @@ mod test {
                 assert_eq!(state.load(Ordering::SeqCst), 1);
 
                 barrier.notify();
-                Scheduler::instance().unwrap().sleep_ms(10).unwrap();
+                Scheduler::instance().unwrap().sleep_ms(10);
                 assert_eq!(state.load(Ordering::SeqCst), 2);
 
                 barrier.notify();
-                Scheduler::instance().unwrap().sleep_ms(10).unwrap();
+                Scheduler::instance().unwrap().sleep_ms(10);
                 assert_eq!(state.load(Ordering::SeqCst), 3);
             })
             .unwrap();

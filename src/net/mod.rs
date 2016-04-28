@@ -57,7 +57,7 @@ fn make_timeout() -> io::Error {
 
 #[cfg(windows)]
 fn make_timeout() -> io::Error {
-    const WSAETIMEDOUT: u32 = 10060;
+    const WSAETIMEDOUT: i32 = 10060;
     io::Error::from_raw_os_error(WSAETIMEDOUT)
 }
 

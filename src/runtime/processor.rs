@@ -247,7 +247,6 @@ pub struct ProcessorInner {
     current_coro: Option<Handle>,
     rand_order: RandomProcessorOrder,
     rng: rand::XorShiftRng,
-    should_finish: bool,
 
     stack_pool: StackPool,
 }
@@ -277,7 +276,6 @@ impl Processor {
             current_coro: None,
             rand_order: RandomProcessorOrder::new(),
             rng: rand::weak_rng(),
-            should_finish: false,
 
             stack_pool: StackPool::new(Some(max_stack_memory_limit / 2),
                                        Some(max_stack_memory_limit)),
@@ -620,20 +618,6 @@ impl Processor {
     }
 
     fn fetch_foreign_coroutines(&mut self) -> Option<Handle> {
-        // Check the receiving channel
-        {
-            while let Ok(msg) = self.chan_receiver.try_recv() {
-                match msg {
-                    ProcMessage::Shutdown(barrier) => {
-                        trace!("{:?}: got shutdown signal", self);
-                        barrier.wait();
-                        self.should_finish = true;
-                        return None;
-                    }
-                }
-            }
-        }
-
         // Randomly steal from neighbors
         {
             let machines = self.scheduler().get_machines();
@@ -673,7 +657,13 @@ impl Processor {
 
         self.rand_order.reset(machine_len);
 
-        while self.should_finish == false {
+        loop {
+            if let Ok(ProcMessage::Shutdown(barrier)) = self.chan_receiver.try_recv() {
+                trace!("{:?}: got shutdown signal", self);
+                barrier.wait();
+                break;
+            }
+
             // TODO: Ensure that coroutines from foreign queues are fetched once in a while.
 
             // Run tasks in local queue
@@ -690,11 +680,9 @@ impl Processor {
             if let Some(hdl) = run_next {
                 run_next = self.resume(hdl);
             } else {
-                if !scheduler.is_shutting_down() {
-                    trace!("{:?}: parking", self);
-                    scheduler.park_processor();
-                    trace!("{:?}: unparked", self);
-                }
+                trace!("{:?}: parking", self);
+                scheduler.park_processor();
+                trace!("{:?}: unparked", self);
             }
         }
 
