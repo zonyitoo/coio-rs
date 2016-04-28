@@ -96,8 +96,14 @@ impl Waiter {
         }
     }
 
+    #[inline]
     pub fn state(&self) -> WaiterState {
         self.state.lock().0
+    }
+
+    #[inline]
+    pub fn set_state(&self, state: WaiterState) {
+        self.state.lock().0 = state;
     }
 
     pub fn try_wait(&self, coro: Handle) -> Option<Handle> {
@@ -235,7 +241,7 @@ impl Notifier {
     }
 
     pub fn notify_all(&self, t: WaiterState, hdl_list: &mut HandleList) {
-        let mut count = 1usize;
+        let mut count = 0usize;
         let mut lst = self.wait_list.lock();
         while let Some(waiter) = lst.pop() {
             let waiter = unsafe { &mut **waiter };
@@ -248,6 +254,11 @@ impl Notifier {
                 hdl_list.push_back(hdl);
             }
 
+            count += 1;
+        }
+
+        // NOTE: If I found no pending coroutines, plus 1 to the notified
+        if count == 0 {
             count += 1;
         }
 
@@ -266,17 +277,41 @@ impl Notifier {
         }
 
         let mut waiter = Waiter::new();
-        waiter.bind(self);
         p.park_with(|p, coro| {
+            {
+                let mut lst = self.wait_list.lock();
+                lst.push(&mut waiter);
+                waiter.notifier = Some(self as *const _);
+
+                let notified = self.notified.load(Ordering::SeqCst);
+                if token < notified {
+                    trace!("Already notified for token {}, no need to wait", token);
+                    p.ready(coro);
+                    return;
+                }
+            }
+
             if let Some(coro) = waiter.try_wait(coro) {
                 p.ready(coro);
             }
         });
-        waiter.state()
+
+        match waiter.state() {
+            WaiterState::Empty => WaiterState::Succeeded,
+            state => state,
+        }
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> Result<WaiterState, TimerError> {
         let p = Processor::current().expect("Notifier::wait should be run in a Coroutine");
+
+        // Short path
+        let token = self.token.fetch_add(1, Ordering::SeqCst);
+        let notified = self.notified.load(Ordering::SeqCst);
+        if token < notified {
+            trace!("Already notified for token {}, no need to wait", token);
+            return Ok(WaiterState::Succeeded);
+        }
 
         let mut waiter = Waiter::new();
 
@@ -284,8 +319,20 @@ impl Notifier {
         let timeout = try!(p.scheduler().timeout(wait_ms, &mut waiter));
         waiter.set_timeout(timeout);
 
-        waiter.bind(self);
         p.park_with(|p, coro| {
+            {
+                let mut lst = self.wait_list.lock();
+                lst.push(&mut waiter);
+                waiter.notifier = Some(self as *const _);
+
+                let notified = self.notified.load(Ordering::SeqCst);
+                if token < notified {
+                    trace!("Already notified for token {}, no need to wait", token);
+                    p.ready(coro);
+                    return;
+                }
+            }
+
             if let Some(coro) = waiter.try_wait(coro) {
                 p.ready(coro);
             }
