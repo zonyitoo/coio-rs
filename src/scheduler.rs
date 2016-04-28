@@ -26,21 +26,24 @@ use std::fmt::Debug;
 use std::io::{self, Write};
 use std::mem;
 use std::panic;
-use std::ptr;
 use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
+use std::ptr::Shared;
 
-use mio::{Evented, EventLoop, EventSet, Handler, NotifyError, PollOpt, Sender, TimerError, Token};
+use mio::{Evented, EventLoop, EventSet, Handler, NotifyError, PollOpt, Sender, Token};
 use slab::Slab;
+use time;
 
 use coroutine::{Coroutine, Handle, HandleList};
 use join_handle::{self, JoinHandleReceiver};
 use options::Options;
-use runtime::processor::{self, Machine, Processor, ProcMessage};
 use sync::spinlock::Spinlock;
 
+use runtime::processor::{self, Machine, Processor, ProcMessage};
+use runtime::notifier::{Notifier, Waiter, WaiterState};
+use runtime::timer::{Timer, Timeout, TimerError};
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
@@ -94,29 +97,29 @@ impl DeregisterMessage {
     }
 }
 
-#[doc(hidden)]
-pub struct TimerMessage {
-    coro: Handle,
-    delay: u64,
-    result: *mut Result<(), TimerError>,
-}
-
-impl TimerMessage {
-    #[inline]
-    fn new(coro: Handle, delay: u64, result: &mut Result<(), TimerError>) -> TimerMessage {
-        TimerMessage {
-            coro: coro,
-            delay: delay,
-            result: result,
-        }
-    }
-}
+// #[doc(hidden)]
+// pub struct TimerMessage {
+//     coro: Handle,
+//     delay: u64,
+//     result: *mut Result<(), TimerError>,
+// }
+//
+// impl TimerMessage {
+//     #[inline]
+//     fn new(coro: Handle, delay: u64, result: &mut Result<(), TimerError>) -> TimerMessage {
+//         TimerMessage {
+//             coro: coro,
+//             delay: delay,
+//             result: result,
+//         }
+//     }
+// }
 
 #[doc(hidden)]
 pub enum Message {
     Register(RegisterMessage),
     Deregister(DeregisterMessage),
-    Timer(TimerMessage),
+    // Timer(TimerMessage),
     Shutdown,
 }
 
@@ -141,64 +144,39 @@ impl Into<EventSet> for ReadyType {
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct ReadyStates(Arc<Spinlock<(EventSet, [Option<Handle>; 4])>>);
+pub struct ReadyStates(Arc<[Notifier; 2]>);
 
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
-        ReadyStates(Arc::new(Spinlock::new((EventSet::none(), [None, None, None, None]))))
+        ReadyStates(Arc::new([Notifier::default(), Notifier::default()]))
     }
 
     #[inline]
-    pub fn wait(&self, ready_type: ReadyType) {
-        let event_set: EventSet = ready_type.into();
-        let mut inner = self.0.lock();
-
-        if inner.0.contains(event_set) {
-            inner.0.remove(event_set);
-        } else {
-            drop(inner);
-
-            let p = Processor::current().expect("cannot wait without processor");
-            p.park_with(|p, coro| {
-                let mut inner = self.0.lock();
-
-                if inner.0.contains(event_set) {
-                    inner.0.remove(event_set);
-                    p.ready(coro);
-                } else {
-                    inner.1[ready_type as usize] = Some(coro);
-                }
-            });
-        }
+    pub fn wait(&self, ready_type: ReadyType) -> WaiterState {
+        self.0[ready_type as usize].wait()
     }
 
     #[inline]
-    pub fn make_ready(&self, ready_type: ReadyType) {
-        self.0.lock().0.insert(ready_type.into());
-    }
-
-    // WARNING: `handles` has to be uninitialized
-    #[inline]
-    fn notify(&self, event_set: EventSet, handles: &mut [Handle; 4]) -> usize {
-        let mut inner = self.0.lock();
-        let mut handle_count = 0usize;
-
-        for i in 0..4usize {
-            let event: EventSet = unsafe { mem::transmute(1usize << i) };
-
-            if event_set.contains(event) {
-                if let Some(coro) = inner.1[i].take() {
-                    unsafe { ptr::write(handles.as_mut_ptr().offset(handle_count as isize), coro) };
-                    handle_count += 1;
-                } else {
-                    inner.0.insert(event);
-                }
-            }
+    fn notify(&self, event_set: EventSet, handles: &mut HandleList) {
+        if event_set.contains(EventSet::readable()) {
+            self.0[ReadyType::Readable as usize].notify_all(WaiterState::Succeeded, handles);
         }
 
-        handle_count
+        if event_set.contains(EventSet::writable()) {
+            self.0[ReadyType::Writable as usize].notify_all(WaiterState::Succeeded, handles);
+        }
+
+        if event_set.contains(EventSet::error() | EventSet::hup()) {
+            self.0[ReadyType::Readable as usize].notify_all(WaiterState::Error, handles);
+            self.0[ReadyType::Writable as usize].notify_all(WaiterState::Error, handles);
+        }
     }
+}
+
+enum TimerWaitType {
+    Handle(Handle),
+    Waiter(Shared<Waiter>),
 }
 
 /// Coroutine scheduler
@@ -210,6 +188,7 @@ pub struct Scheduler {
     // Mio event loop handler
     event_loop_sender: Option<Sender<Message>>,
     slab: Slab<ReadyStates, usize>,
+    timer: Spinlock<Timer<TimerWaitType>>,
 
     // NOTE:
     // This member is _used_ concurrently, but still deliberately used without any kind of locks.
@@ -238,6 +217,7 @@ impl Scheduler {
 
             event_loop_sender: None,
             slab: Slab::new(1024),
+            timer: Spinlock::new(Timer::new(100, 1_024, 65_536)),
 
             machines: UnsafeCell::new(Vec::new()),
 
@@ -294,6 +274,9 @@ impl Scheduler {
             default_handler(panic_info);
         }));
 
+        // Timer has to be setup before any kind of operations on it
+        self.timer.lock().setup();
+
         trace!("creating EventLoop");
 
         let mut event_loop = EventLoop::new().unwrap();
@@ -341,9 +324,42 @@ impl Scheduler {
         trace!("running EventLoop");
 
         while event_loop.is_running() {
-            thread::sleep(::std::time::Duration::new(0, 500_000));
-            event_loop.run_once(self, None).unwrap();
+            let begin_time = time::now();
+            let now = self.timer.lock().now();
+            loop {
+                match self.timer.lock().tick_to(now) {
+                    Some(TimerWaitType::Handle(hdl)) => self.io_handler_queue.push_back(hdl),
+                    Some(TimerWaitType::Waiter(waiter_ptr)) => {
+                        let waiter = unsafe { &**waiter_ptr };
+                        if let Some(hdl) = waiter.notify(WaiterState::Timedout) {
+                            self.io_handler_queue.push_back(hdl);
+                        }
+                    }
+                    None => break,
+                }
+            }
+
             self.append_io_handler_to_global_queue();
+
+            let passed = time::now() - begin_time;
+            let passed = passed.to_std().unwrap();
+
+            let pending = match self.timer.lock().next_tick_in_ms() {
+                Some(ms) => Some(::std::time::Duration::from_millis(ms)),
+                None => {
+                    let expected_sleep = ::std::time::Duration::new(0, 500_000);
+                    if passed < expected_sleep {
+                        Some(expected_sleep - passed)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            // FIXME: pending is ms, but expected_sleep is 500_000 nanosec
+            event_loop.run_once(self,
+                                pending.map(|pending| ::duration_to_ms(pending) as usize))
+                      .unwrap();
         }
 
         trace!("EventLoop finished => sending Shutdown");
@@ -523,20 +539,12 @@ impl Scheduler {
         trace!("Scheduler: requesting sleep for {}ms", delay);
 
         let mut ret = Ok(());
-
-        {
-            Scheduler::park_with(|_, coro| {
-                let channel = self.event_loop_sender.as_ref().unwrap();
-                let mut msg = Message::Timer(TimerMessage::new(coro, delay, &mut ret));
-
-                loop {
-                    match channel.send(msg) {
-                        Err(NotifyError::Full(m)) => msg = m,
-                        _ => break,
-                    }
-                }
-            });
-        }
+        Scheduler::park_with(|_, coro| {
+            let mut timer = self.timer.lock();
+            if let Err(err) = timer.timeout_ms(TimerWaitType::Handle(coro), delay) {
+                ret = Err(err);
+            }
+        });
 
         ret
     }
@@ -544,7 +552,24 @@ impl Scheduler {
     /// Block the current coroutine until the specific time
     #[doc(hidden)]
     pub fn sleep(&self, delay: Duration) -> Result<(), TimerError> {
-        self.sleep_ms(delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000)
+        self.sleep_ms(::duration_to_ms(delay))
+    }
+
+    /// IO timeouts
+    #[doc(hidden)]
+    pub fn timeout(&self, delay: u64, waiter: &mut Waiter) -> Result<Timeout, TimerError> {
+        trace!("Scheduler: requesting timeout for {}ms", delay);
+
+        let mut timer = self.timer.lock();
+        timer.timeout_ms(TimerWaitType::Waiter(unsafe { Shared::new(waiter) }), delay)
+    }
+
+    /// IO cancel
+    pub fn cancel_timeout(&self, timeout: Timeout) -> bool {
+        trace!("Scheduler: requesting to cancel timeout");
+
+        let mut timer = self.timer.lock();
+        timer.clear(&timeout)
     }
 
     #[doc(hidden)]
@@ -675,15 +700,7 @@ impl Handler for Scheduler {
         trace!("Handler: got {:?} for {:?}", events, token);
 
         let ready_states = self.slab.get(token.as_usize()).expect("Token must be registered");
-        let mut handles: [Handle; 4] = unsafe { mem::uninitialized() };
-        let handle_count = ready_states.notify(events, &mut handles);
-
-        for hdl in &handles[..handle_count] {
-            trace!("Handler: got {:?}", hdl);
-            self.io_handler_queue.push_back(unsafe { mem::transmute_copy(hdl) });
-        }
-
-        mem::forget(handles);
+        ready_states.notify(events, &mut self.io_handler_queue)
     }
 
     fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, token: Token) {
@@ -724,18 +741,18 @@ impl Handler for Scheduler {
                 (msg.cb)(event_loop);
                 self.io_handler_queue.push_back(msg.coro);
             }
-            Message::Timer(msg) => {
-                trace!("Handler: adding timer for {:?}", msg.coro);
-
-                let coro_ptr = Handle::into_raw(msg.coro);
-                let token = unsafe { mem::transmute(coro_ptr) };
-                let result = unsafe { &mut *msg.result };
-
-                if let Err(err) = event_loop.timeout_ms(token, msg.delay) {
-                    *result = Err(err);
-                    self.io_handler_queue.push_back(unsafe { Handle::from_raw(coro_ptr) });
-                }
-            }
+            // Message::Timer(msg) => {
+            //     trace!("Handler: adding timer for {:?}", msg.coro);
+            //
+            //     let coro_ptr = Handle::into_raw(msg.coro);
+            //     let token = unsafe { mem::transmute(coro_ptr) };
+            //     let result = unsafe { &mut *msg.result };
+            //
+            //     if let Err(err) = event_loop.timeout_ms(token, msg.delay) {
+            //         *result = Err(err);
+            //         self.io_handler_queue.push_back(unsafe { Handle::from_raw(coro_ptr) });
+            //     }
+            // }
             Message::Shutdown => {
                 trace!("Handler: shutting down");
                 event_loop.shutdown();

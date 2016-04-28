@@ -42,6 +42,9 @@ extern crate mio;
 extern crate rand;
 extern crate slab;
 extern crate linked_hash_map;
+extern crate time;
+
+use std::time::Duration;
 
 pub mod join_handle;
 pub mod net;
@@ -173,6 +176,9 @@ fn global_work_count_get() -> usize {
     0
 }
 
+fn duration_to_ms(dur: Duration) -> u64 {
+    dur.as_secs() * 1_000 + dur.subsec_nanos() as u64 / 1_000_000
+}
 
 #[cfg(test)]
 mod test {
