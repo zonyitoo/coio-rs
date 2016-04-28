@@ -44,8 +44,6 @@ extern crate slab;
 extern crate linked_hash_map;
 extern crate time;
 
-use std::time::Duration;
-
 pub mod join_handle;
 pub mod net;
 pub mod options;

@@ -209,7 +209,6 @@ impl Notifier {
     }
 
     pub fn notify_all(&self, t: WaiterState, hdl_list: &mut HandleList) {
-        println!("NOTIFY ALL!");
         let mut count = 0usize;
         let mut lst = self.wait_list.lock();
         while let Some(waiter) = lst.pop() {
@@ -222,7 +221,6 @@ impl Notifier {
             if let Some(hdl) = waiter.notify(t) {
                 hdl_list.push_back(hdl);
             }
-            println!("NOTIFIED?");
 
             count += 1;
         }
@@ -230,8 +228,6 @@ impl Notifier {
         if count == 0 {
             count += 1;
         }
-
-        println!("DONE");
 
         self.notified.fetch_add(count, Ordering::SeqCst);
     }
@@ -252,7 +248,6 @@ impl Notifier {
             if let Some(coro) = waiter.try_wait(coro) {
                 p.ready(coro);
             }
-            println!("PARKED");
         });
         waiter.state()
     }
