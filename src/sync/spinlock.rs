@@ -47,15 +47,20 @@ fn cpu_relax() {
     }
 }
 
-const BACKOFF_BASE: usize = 1 << 10;
-const BACKOFF_CEILING: usize = 1 << 20;
+// Tests showed that Spinlock waits for at least about 1024 cycles before it acquires a lock.
+// Furthermore tests showed that a low base or a high ceiling
+// leads to high variance and starved threads.
+const BACKOFF_BASE: usize = 1 << 9;
+const BACKOFF_CEILING: usize = 1 << 12;
 
 /// A simple, unfair spinlock.
 ///
-/// It is almost never a good idea to use this primitive compared to `TicketSpinlock`.
+/// It is often not a good idea to use this primitive compared to `TicketSpinlock` or a `Mutex`.
 /// This is due to the fact that this spinlock does not care about fairness and
 /// thus one thread can be granted access *much* more often than others.
-/// Even in practice differences of a factor of 2 or more can often been seen.
+/// Even in practice differences of a factor of 10 or more can often been seen.
+/// Furthermore it does not park the current thread if a lock is held for a long time.
+/// Apart from that this lock is at least 3-10 times faster in average than the alternatives.
 pub struct Spinlock<T: ?Sized> {
     lock: AtomicBool,
     data: UnsafeCell<T>,
