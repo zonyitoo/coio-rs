@@ -76,13 +76,6 @@ impl Waiter {
         }
     }
 
-    pub fn bind(&mut self, notifier: &Notifier) {
-        debug_assert!(self.notifier.is_none(), "Waiter is already binded");
-        let mut lst = notifier.wait_list.lock();
-        lst.push(self);
-        self.notifier = Some(notifier as *const _);
-    }
-
     #[must_use]
     pub fn notify(&self, t: WaiterState) -> Option<Handle> {
         debug_assert!(t != WaiterState::Empty);
@@ -131,8 +124,7 @@ impl Waiter {
             Some(noti) => {
                 // Force remove
                 let noti = &*noti;
-                let mut lst = noti.wait_list.lock();
-                lst.remove(self);
+                noti.remove_waiter(self);
             }
         }
     }
@@ -228,6 +220,12 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    fn remove_waiter(&self, waiter: &mut Waiter) {
+        let mut lst = self.wait_list.lock();
+        lst.remove(waiter);
+    }
+
+    #[allow(dead_code)]
     pub fn notify_one(&self, t: WaiterState) -> Option<Handle> {
         let mut hdl = None;
         if let Some(waiter) = self.wait_list.lock().pop() {

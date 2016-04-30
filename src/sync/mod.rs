@@ -23,6 +23,7 @@
 //! Coroutine synchronization
 
 pub use self::mutex::Mutex;
+pub use self::mutex::Condvar;
 
 pub mod mono_barrier;
 pub mod mpsc;
