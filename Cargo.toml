@@ -28,3 +28,7 @@ libc = "0.2"
 [dependencies.log]
 version = "0.3"
 features = ["release_max_level_info"]
+
+[[bench]]
+name = "spinlock"
+harness = false

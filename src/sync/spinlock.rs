@@ -25,8 +25,42 @@
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[inline(always)]
+fn cpu_relax() {
+    if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        unsafe {
+            // "Modern" processors exiting a tight loop (like this one)
+            // usually detect a _possible_ memory order violation.
+            // The PAUSE instruction hints that this is a busy-waiting
+            // loop and that no such violation will occur.
+            // Furthermore it might also relax the loop and
+            // efficiently "pause" the processor for a bit,
+            // which reduces power consumption for some CPUs.
+            asm!("pause" ::: "memory" : "volatile");
+        }
+    } else {
+        unsafe {
+            asm!("" ::: "memory" : "volatile");
+        }
+    }
+}
+
+// Tests showed that Spinlock waits for at least about 1024 cycles before it acquires a lock.
+// Furthermore tests showed that a low base or a high ceiling
+// leads to high variance and starved threads.
+const BACKOFF_BASE: usize = 1 << 9;
+const BACKOFF_CEILING: usize = 1 << 12;
+
+/// A simple, unfair spinlock.
+///
+/// It is often not a good idea to use this primitive compared to `TicketSpinlock` or a `Mutex`.
+/// This is due to the fact that this spinlock does not care about fairness and
+/// thus one thread can be granted access *much* more often than others.
+/// Even in practice differences of a factor of 10 or more can often been seen.
+/// Furthermore it does not park the current thread if a lock is held for a long time.
+/// Apart from that this lock is at least 3-10 times faster in average than the alternatives.
 pub struct Spinlock<T: ?Sized> {
     lock: AtomicBool,
     data: UnsafeCell<T>,
@@ -35,9 +69,6 @@ pub struct Spinlock<T: ?Sized> {
 unsafe impl<T: ?Sized + Send> Send for Spinlock<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
 
-// This spinlock is a unfair one as such a thread _can_ starve waiting to get the lock.
-// An implementation for a fair version using ticketed spinlocks can be found here:
-//   https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/spinlock.h
 impl<T> Spinlock<T> {
     pub fn new(data: T) -> Spinlock<T> {
         Spinlock {
@@ -48,7 +79,7 @@ impl<T> Spinlock<T> {
 }
 
 impl<T: ?Sized> Spinlock<T> {
-    pub fn try_lock<'a>(&'a self) -> Option<SpinlockGuard<'a, T>> {
+    pub fn try_lock(&self) -> Option<SpinlockGuard<T>> {
         const SUCCESS: Ordering = Ordering::Acquire;
         const FAILURE: Ordering = Ordering::Relaxed;
 
@@ -58,20 +89,21 @@ impl<T: ?Sized> Spinlock<T> {
         }
     }
 
-    pub fn lock<'a>(&'a self) -> SpinlockGuard<'a, T> {
+    pub fn lock(&self) -> SpinlockGuard<T> {
         const SUCCESS: Ordering = Ordering::Acquire;
         const FAILURE: Ordering = Ordering::Relaxed;
 
+        let mut backoff = BACKOFF_BASE;
+
+        // TODO: Use WFE and SEV instructions for ARM
         while self.lock.compare_exchange_weak(false, true, SUCCESS, FAILURE) != Ok(false) {
-            if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-                unsafe {
-                    // "Modern" processors exiting a tight loop (like this one) usually detect a
-                    // _possible_ memory order violation. The PAUSE instruction hints that this
-                    // is a busy-waiting loop and that no such violation will occur.
-                    // Furthermore it might also relax the loop and efficiently "pause" the
-                    // processor for a bit, which reduces power consumption for some CPUs.
-                    asm!("pause" ::: "memory" : "volatile");
+            while self.lock.load(FAILURE) == true {
+                // exponential backoff
+                for _ in 0..backoff {
+                    cpu_relax();
                 }
+
+                backoff <<= (backoff != BACKOFF_CEILING) as usize;
             }
         }
 
@@ -115,5 +147,90 @@ impl<'a, T: ?Sized> Deref for SpinlockGuard<'a, T> {
 impl<'a, T: ?Sized> DerefMut for SpinlockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.1
+    }
+}
+
+/// This "fair" spinlock variant using the ticket lock algorithm.
+///
+/// This lock has a similiar performance to `std::sync::Mutex`, and thus gets slower about 5x
+/// faster than `Spinlock`, but guarantees fairness which a `Mutex` surprisingly does not.
+// TODO:
+//   The CHL or MCS lock would theoretically be much faster the more cores a system has,
+//   but initial tests showed a slow down instead.
+pub struct TicketSpinlock<T: ?Sized> {
+    tick: AtomicUsize,
+    tock: AtomicUsize,
+    data: UnsafeCell<T>,
+}
+
+unsafe impl<T: ?Sized + Send> Send for TicketSpinlock<T> {}
+unsafe impl<T: ?Sized + Send> Sync for TicketSpinlock<T> {}
+
+impl<T> TicketSpinlock<T> {
+    pub fn new(data: T) -> TicketSpinlock<T> {
+        TicketSpinlock {
+            tick: AtomicUsize::new(0),
+            tock: AtomicUsize::new(0),
+            data: UnsafeCell::new(data),
+        }
+    }
+}
+
+impl<T: ?Sized> TicketSpinlock<T> {
+    pub fn lock(&self) -> TicketSpinlockGuard<T> {
+        let ticket = self.tick.fetch_add(1, Ordering::Relaxed);
+
+        loop {
+            let cur = self.tock.load(Ordering::Acquire);
+
+            if cur == ticket {
+                break;
+            }
+
+            // proportional backoff
+            for _ in 0..((ticket - cur) << 2) {
+                cpu_relax();
+            }
+        }
+
+        TicketSpinlockGuard(&self.tock,
+                            ticket.wrapping_add(1),
+                            unsafe { &mut *self.data.get() })
+    }
+}
+
+impl<T: ?Sized + Default> Default for TicketSpinlock<T> {
+    fn default() -> TicketSpinlock<T> {
+        TicketSpinlock::new(Default::default())
+    }
+}
+
+impl<T: ?Sized + fmt::Debug> fmt::Debug for TicketSpinlock<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TicketSpinlock {{ <locked> }}")
+    }
+}
+
+pub struct TicketSpinlockGuard<'a, T: ?Sized + 'a>(&'a AtomicUsize, usize, &'a mut T);
+
+impl<'a, T: ?Sized> !Send for TicketSpinlockGuard<'a, T> {}
+
+impl<'a, T: ?Sized> Drop for TicketSpinlockGuard<'a, T> {
+    fn drop(&mut self) {
+        self.0.store(self.1, Ordering::Release);
+    }
+}
+
+impl<'a, T: ?Sized> Deref for TicketSpinlockGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.2
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for TicketSpinlockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.2
     }
 }
