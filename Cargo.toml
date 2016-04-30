@@ -26,3 +26,7 @@ linked-hash-map = "0.0.9"
 [dependencies.log]
 version = "0.3"
 features = ["release_max_level_info"]
+
+[[bench]]
+name = "spinlock"
+harness = false
