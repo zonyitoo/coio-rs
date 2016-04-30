@@ -27,6 +27,35 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[inline(always)]
+fn cpu_relax() {
+    if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
+        unsafe {
+            // "Modern" processors exiting a tight loop (like this one)
+            // usually detect a _possible_ memory order violation.
+            // The PAUSE instruction hints that this is a busy-waiting
+            // loop and that no such violation will occur.
+            // Furthermore it might also relax the loop and
+            // efficiently "pause" the processor for a bit,
+            // which reduces power consumption for some CPUs.
+            asm!("pause" ::: "memory" : "volatile");
+        }
+    } else {
+        unsafe {
+            asm!("" ::: "memory" : "volatile");
+        }
+    }
+}
+
+const BACKOFF_BASE: usize = 1 << 10;
+const BACKOFF_CEILING: usize = 1 << 20;
+
+/// A simple, unfair spinlock.
+///
+/// It is almost never a good idea to use this primitive compared to `TicketSpinlock`.
+/// This is due to the fact that this spinlock does not care about fairness and
+/// thus one thread can be granted access *much* more often than others.
+/// Even in practice differences of a factor of 2 or more can often been seen.
 pub struct Spinlock<T: ?Sized> {
     lock: AtomicBool,
     data: UnsafeCell<T>,
@@ -35,9 +64,6 @@ pub struct Spinlock<T: ?Sized> {
 unsafe impl<T: ?Sized + Send> Send for Spinlock<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Spinlock<T> {}
 
-// This spinlock is a unfair one as such a thread _can_ starve waiting to get the lock.
-// An implementation for a fair version using ticketed spinlocks can be found here:
-//   https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/spinlock.h
 impl<T> Spinlock<T> {
     pub fn new(data: T) -> Spinlock<T> {
         Spinlock {
@@ -48,7 +74,7 @@ impl<T> Spinlock<T> {
 }
 
 impl<T: ?Sized> Spinlock<T> {
-    pub fn try_lock<'a>(&'a self) -> Option<SpinlockGuard<'a, T>> {
+    pub fn try_lock(&self) -> Option<SpinlockGuard<T>> {
         const SUCCESS: Ordering = Ordering::Acquire;
         const FAILURE: Ordering = Ordering::Relaxed;
 
@@ -58,20 +84,21 @@ impl<T: ?Sized> Spinlock<T> {
         }
     }
 
-    pub fn lock<'a>(&'a self) -> SpinlockGuard<'a, T> {
+    pub fn lock(&self) -> SpinlockGuard<T> {
         const SUCCESS: Ordering = Ordering::Acquire;
         const FAILURE: Ordering = Ordering::Relaxed;
 
+        let mut backoff = BACKOFF_BASE;
+
+        // TODO: Use WFE and SEV instructions for ARM
         while self.lock.compare_exchange_weak(false, true, SUCCESS, FAILURE) != Ok(false) {
-            if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {
-                unsafe {
-                    // "Modern" processors exiting a tight loop (like this one) usually detect a
-                    // _possible_ memory order violation. The PAUSE instruction hints that this
-                    // is a busy-waiting loop and that no such violation will occur.
-                    // Furthermore it might also relax the loop and efficiently "pause" the
-                    // processor for a bit, which reduces power consumption for some CPUs.
-                    asm!("pause" ::: "memory" : "volatile");
+            while self.lock.load(FAILURE) == true {
+                // exponential backoff
+                for _ in 0..backoff {
+                    cpu_relax();
                 }
+
+                backoff <<= (backoff != BACKOFF_CEILING) as usize;
             }
         }
 
