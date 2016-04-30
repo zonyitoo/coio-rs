@@ -229,6 +229,7 @@ impl Default for Condvar {
 mod test {
     use std::sync::Arc;
     use std::time::Duration;
+    use std::collections::VecDeque;
 
     use scheduler::Scheduler;
 
@@ -295,6 +296,50 @@ mod test {
                 let guard = pair.0.lock().unwrap();
                 let (_, t) = pair.1.wait_timeout(guard, Duration::from_millis(1)).unwrap();
                 assert!(t.timed_out());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn condvar_protected_queue() {
+        let pair = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        Scheduler::new()
+            .with_workers(10)
+            .run(move || {
+
+                let cloned_pair = pair.clone();
+                let producer = Scheduler::spawn(move || {
+                    for i in 0..10 {
+                        let mut queue = cloned_pair.0.lock().unwrap();
+                        queue.push_back(i);
+                        cloned_pair.1.notify_one();
+                        Scheduler::sched();
+                    }
+                });
+
+                let mut cons = Vec::with_capacity(10);
+
+                for _ in 0..10 {
+                    let pair = pair.clone();
+                    let consumer = Scheduler::spawn(move || {
+                        let mut queue = pair.0.lock().unwrap();
+                        while queue.is_empty() {
+                            queue = pair.1.wait(queue).unwrap();
+                        }
+
+                        queue.pop_front().unwrap()
+                    });
+                    cons.push(consumer);
+                }
+
+                let mut sum = 0;
+
+                let _ = producer.join();
+                for h in cons {
+                    sum += h.join().unwrap();
+                }
+
+                assert_eq!(sum, 45);
             })
             .unwrap();
     }
