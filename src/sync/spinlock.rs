@@ -25,7 +25,7 @@
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[inline(always)]
 fn cpu_relax() {
@@ -142,5 +142,90 @@ impl<'a, T: ?Sized> Deref for SpinlockGuard<'a, T> {
 impl<'a, T: ?Sized> DerefMut for SpinlockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.1
+    }
+}
+
+/// This "fair" spinlock variant using the ticket lock algorithm.
+///
+/// This lock has a similiar performance to `std::sync::Mutex`, and thus gets slower about 5x
+/// faster than `Spinlock`, but guarantees fairness which a `Mutex` surprisingly does not.
+// TODO:
+//   The CHL or MCS lock would theoretically be much faster the more cores a system has,
+//   but initial tests showed a slow down instead.
+pub struct TicketSpinlock<T: ?Sized> {
+    tick: AtomicUsize,
+    tock: AtomicUsize,
+    data: UnsafeCell<T>,
+}
+
+unsafe impl<T: ?Sized + Send> Send for TicketSpinlock<T> {}
+unsafe impl<T: ?Sized + Send> Sync for TicketSpinlock<T> {}
+
+impl<T> TicketSpinlock<T> {
+    pub fn new(data: T) -> TicketSpinlock<T> {
+        TicketSpinlock {
+            tick: AtomicUsize::new(0),
+            tock: AtomicUsize::new(0),
+            data: UnsafeCell::new(data),
+        }
+    }
+}
+
+impl<T: ?Sized> TicketSpinlock<T> {
+    pub fn lock(&self) -> TicketSpinlockGuard<T> {
+        let ticket = self.tick.fetch_add(1, Ordering::Relaxed);
+
+        loop {
+            let cur = self.tock.load(Ordering::Acquire);
+
+            if cur == ticket {
+                break;
+            }
+
+            // proportional backoff
+            for _ in 0..((ticket - cur) << 2) {
+                cpu_relax();
+            }
+        }
+
+        TicketSpinlockGuard(&self.tock,
+                            ticket.wrapping_add(1),
+                            unsafe { &mut *self.data.get() })
+    }
+}
+
+impl<T: ?Sized + Default> Default for TicketSpinlock<T> {
+    fn default() -> TicketSpinlock<T> {
+        TicketSpinlock::new(Default::default())
+    }
+}
+
+impl<T: ?Sized + fmt::Debug> fmt::Debug for TicketSpinlock<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TicketSpinlock {{ <locked> }}")
+    }
+}
+
+pub struct TicketSpinlockGuard<'a, T: ?Sized + 'a>(&'a AtomicUsize, usize, &'a mut T);
+
+impl<'a, T: ?Sized> !Send for TicketSpinlockGuard<'a, T> {}
+
+impl<'a, T: ?Sized> Drop for TicketSpinlockGuard<'a, T> {
+    fn drop(&mut self) {
+        self.0.store(self.1, Ordering::Release);
+    }
+}
+
+impl<'a, T: ?Sized> Deref for TicketSpinlockGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.2
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for TicketSpinlockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.2
     }
 }
