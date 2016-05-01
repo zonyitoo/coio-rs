@@ -306,17 +306,20 @@ impl DerefMut for Handle {
 impl Drop for Handle {
     #[inline]
     fn drop(&mut self) {
-        let ctx = self.take_context();
+        let mut ctx = self.take_context();
         let state = self.state();
 
         trace!("{:?}: dropping with state {:?}", self, state);
-        self.state = State::Dropping;
-
-        if state == State::Finished {
-            ctx.resume(0);
-        } else {
-            ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind);
+        if state != State::Finished {
+            ctx = ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind).context;
         }
+
+        debug_assert!(self.state() == State::Finished,
+                      "Expecting Coroutine to be finished");
+
+        // Final step, drop the coroutine
+        self.state = State::Dropping;
+        ctx.resume(0);
     }
 }
 
