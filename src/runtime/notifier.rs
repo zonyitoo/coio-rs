@@ -375,6 +375,11 @@ unsafe impl Sync for Notifier {}
 impl Drop for Notifier {
     fn drop(&mut self) {
         let mut lst = self.wait_list.lock();
-        while let Some(_) = lst.pop() {}
+        while let Some(w) = lst.pop() {
+            unsafe {
+                let w = &mut **w;
+                w.unbind();
+            }
+        }
     }
 }

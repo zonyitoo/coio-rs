@@ -327,7 +327,7 @@ impl Scheduler {
                 }
             });
             trace!("run_once({:?})", next_tick);
-            event_loop.run_once(self, next_tick).unwrap();
+            event_loop.run_once(self, next_tick.or(Some(1000))).unwrap();
 
             {
                 let mut timer = self.timer.lock();
