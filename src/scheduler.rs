@@ -219,7 +219,7 @@ pub struct Scheduler {
 
     idle_processor_condvar: Condvar,
     idle_processor_count: AtomicUsize,
-    idle_processor_mutex: Mutex<()>,
+    idle_processor_mutex: Mutex<bool>,
     is_shutting_down: AtomicBool,
     spinning_processor_count: AtomicUsize,
 
@@ -243,7 +243,7 @@ impl Scheduler {
 
             idle_processor_condvar: Condvar::new(),
             idle_processor_count: AtomicUsize::new(0),
-            idle_processor_mutex: Mutex::new(()),
+            idle_processor_mutex: Mutex::new(false),
             is_shutting_down: AtomicBool::new(false),
             spinning_processor_count: AtomicUsize::new(0),
 
@@ -358,6 +358,7 @@ impl Scheduler {
         trace!("awaiting completion of Machines");
         {
             self.is_shutting_down.store(true, Ordering::SeqCst);
+            *self.idle_processor_mutex.lock().unwrap() = true;
             self.idle_processor_condvar.notify_all();
 
             // NOTE: It's critical that all threads are joined since Processor
@@ -625,12 +626,15 @@ impl Scheduler {
     }
 
     #[doc(hidden)]
-    pub fn park_processor(&self) {
+    pub fn park_processor<F: FnOnce() -> bool>(&self, before_wait: F) {
         self.idle_processor_count.fetch_add(1, Ordering::Relaxed);
 
         {
             let idle_processor_mutex = self.idle_processor_mutex.lock().unwrap();
-            let _ = self.idle_processor_condvar.wait(idle_processor_mutex);
+
+            if !*idle_processor_mutex && before_wait() {
+                let _ = self.idle_processor_condvar.wait(idle_processor_mutex);
+            }
         }
 
         self.idle_processor_count.fetch_sub(1, Ordering::Relaxed);
@@ -653,6 +657,7 @@ impl Scheduler {
                 max
             };
 
+            let _guard = self.idle_processor_mutex.lock().unwrap();
             for _ in 0..cnt {
                 self.idle_processor_condvar.notify_one();
             }
@@ -714,6 +719,7 @@ impl Handler for Scheduler {
                     }
                 });
 
+                trace!("Handler: registering finished for {:?}", coro);
                 self.io_handler_queue.push_back(coro);
             }
             Message::Deregister(msg) => {
@@ -722,6 +728,8 @@ impl Handler for Scheduler {
                 let _ = self.slab.remove(unsafe { mem::transmute(msg.token) });
 
                 (msg.cb)(event_loop);
+
+                trace!("Handler: deregistering finished for {:?}", msg.coro);
                 self.io_handler_queue.push_back(msg.coro);
             }
             Message::Timer(msg) => {

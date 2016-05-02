@@ -692,7 +692,10 @@ impl Processor {
             } else {
                 if !scheduler.is_shutting_down() {
                     trace!("{:?}: parking", self);
-                    scheduler.park_processor();
+                    scheduler.park_processor(|| {
+                        run_next = self.fetch_foreign_coroutines();
+                        run_next.is_none()
+                    });
                     trace!("{:?}: unparked", self);
                 }
             }
