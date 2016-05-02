@@ -367,6 +367,8 @@ impl Scheduler {
 
         trace!("awaiting completion of Machines");
         {
+            *self.idle_processor_mutex.lock().unwrap() = true;
+            self.idle_processor_condvar.notify_all();
             // NOTE: It's critical that all threads are joined since Processor
             // maintains a reference to this Scheduler using raw pointers.
             for m in machines.drain(..) {
@@ -645,17 +647,15 @@ impl Scheduler {
     }
 
     #[doc(hidden)]
-    pub fn park_processor(&self) {
+    pub fn park_processor<F: FnOnce() -> bool>(&self, before_wait: F) {
         self.idle_processor_count.fetch_add(1, Ordering::Relaxed);
 
         {
             let idle_processor_mutex = self.idle_processor_mutex.lock().unwrap();
 
-            if *idle_processor_mutex {
-                return;
+            if !*idle_processor_mutex && before_wait() {
+                let _ = self.idle_processor_condvar.wait(idle_processor_mutex);
             }
-
-            let _ = self.idle_processor_condvar.wait(idle_processor_mutex);
         }
 
         self.idle_processor_count.fetch_sub(1, Ordering::Relaxed);
@@ -678,6 +678,7 @@ impl Scheduler {
                 max
             };
 
+            let _guard = self.idle_processor_mutex.lock().unwrap();
             for _ in 0..cnt {
                 self.idle_processor_condvar.notify_one();
             }
@@ -727,6 +728,7 @@ impl Handler for Scheduler {
                     }
                 });
 
+                trace!("Handler: registering finished for {:?}", coro);
                 self.io_handler_queue.push_back(coro);
             }
             Message::Deregister(msg) => {
@@ -735,6 +737,8 @@ impl Handler for Scheduler {
                 let _ = self.slab.remove(unsafe { mem::transmute(msg.token) });
 
                 (msg.cb)(event_loop);
+
+                trace!("Handler: deregistering finished for {:?}", msg.coro);
                 self.io_handler_queue.push_back(msg.coro);
             }
             Message::Shutdown => {

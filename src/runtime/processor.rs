@@ -681,7 +681,10 @@ impl Processor {
                 run_next = self.resume(hdl);
             } else {
                 trace!("{:?}: parking", self);
-                scheduler.park_processor();
+                scheduler.park_processor(|| {
+                    run_next = self.fetch_foreign_coroutines();
+                    run_next.is_none()
+                });
                 trace!("{:?}: unparked", self);
             }
         }
