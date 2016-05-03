@@ -47,20 +47,14 @@ fn cpu_relax() {
     }
 }
 
-// Tests showed that Spinlock waits for at least about 1024 cycles before it acquires a lock.
-// Furthermore tests showed that a low base or a high ceiling
-// leads to high variance and starved threads.
-const BACKOFF_BASE: usize = 1 << 9;
+// 1<<4 iterations (16) equals about 40ns on a i7 3770
+const BACKOFF_BASE: usize = 1 << 4;
 const BACKOFF_CEILING: usize = 1 << 12;
 
 /// A simple, unfair spinlock.
 ///
-/// It is often not a good idea to use this primitive compared to `TicketSpinlock` or a `Mutex`.
-/// This is due to the fact that this spinlock does not care about fairness and
-/// thus one thread can be granted access *much* more often than others.
-/// Even in practice differences of a factor of 10 or more can often been seen.
-/// Furthermore it does not park the current thread if a lock is held for a long time.
-/// Apart from that this lock is at least 3-10 times faster in average than the alternatives.
+/// This type of lock can grant one thread access more often than others,
+/// but will be *at least* twice as fast as a Mutex and generally be fairer than one.
 pub struct Spinlock<T: ?Sized> {
     lock: AtomicBool,
     data: UnsafeCell<T>,
@@ -97,14 +91,16 @@ impl<T: ?Sized> Spinlock<T> {
 
         // TODO: Use WFE and SEV instructions for ARM
         while self.lock.compare_exchange_weak(false, true, SUCCESS, FAILURE) != Ok(false) {
-            while self.lock.load(FAILURE) == true {
-                // exponential backoff
-                for _ in 0..backoff {
-                    cpu_relax();
-                }
-
-                backoff <<= (backoff != BACKOFF_CEILING) as usize;
+            // NOTE:
+            //   Spinning here using `while self.lock.load(Relaxed) == true {}`
+            //   is commonly done and would buy us about 10% more performance.
+            //   But this would come with the cost of extreme unfairness under contention.
+            for _ in 0..backoff {
+                cpu_relax();
             }
+
+            // exponential backoff
+            backoff <<= (backoff != BACKOFF_CEILING) as usize;
         }
 
         SpinlockGuard(&self.lock, unsafe { &mut *self.data.get() })
