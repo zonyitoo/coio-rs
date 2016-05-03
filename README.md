@@ -1,7 +1,6 @@
 # Coroutine I/O
 
 [![Build Status](https://travis-ci.org/zonyitoo/coio-rs.svg?branch=master)](https://travis-ci.org/zonyitoo/coio-rs)
-[![Build status](https://ci.appveyor.com/api/projects/status/6c3j6thrij9ow0n4?svg=true)](https://ci.appveyor.com/project/zonyitoo/coio-rs)
 
 Coroutine scheduling with work-stealing algorithm.
 
