@@ -43,6 +43,9 @@ extern crate rand;
 extern crate slab;
 extern crate linked_hash_map;
 
+#[cfg(test)]
+extern crate env_logger;
+
 pub mod join_handle;
 pub mod net;
 pub mod options;
