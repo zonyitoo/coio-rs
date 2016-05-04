@@ -236,12 +236,20 @@ impl Notifier {
             hdl = waiter.notify(t);
         }
 
+        // NOTE: Add one anyway to synchronize with self.token
         self.notified.fetch_add(1, Ordering::SeqCst);
         hdl
     }
 
     pub fn notify_all(&self, t: WaiterState, hdl_list: &mut HandleList) {
-        let mut count = 0usize;
+        // NOTE: Initialize to 1 is to resolve a race condition:
+        //
+        // If one coroutine wants to wait on this Notifier, but someone is calling this method,
+        // which will lock the wait_list, he will not be able to wait on the wait_list. After
+        // that, he can grap the wait_list lock, but he may not be waken up anymore because
+        // notify_all has already been called once.
+        let mut count = 1usize;
+
         let mut lst = self.wait_list.lock();
         while let Some(waiter) = lst.pop() {
             let waiter = unsafe { &mut **waiter };
@@ -249,16 +257,10 @@ impl Notifier {
             // NOTE: Must unbind the notifier here!
             waiter.notifier = None;
 
-            // FIXME: Deadlock! WHY?
             if let Some(hdl) = waiter.notify(t) {
                 hdl_list.push_back(hdl);
             }
 
-            count += 1;
-        }
-
-        // NOTE: If I found no pending coroutines, plus 1 to the notified
-        if count == 0 {
             count += 1;
         }
 
