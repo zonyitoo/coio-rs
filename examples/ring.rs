@@ -1,3 +1,11 @@
+// Copyright 2015 The coio Developers.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 extern crate coio;
 extern crate time;
 
@@ -47,9 +55,7 @@ fn main() {
     let name = args.next().unwrap();
     let (iters, size, procs) = match (args.next(), args.next(), args.next()) {
         (Some(iters), Some(size), Some(procs)) => {
-            (iters.parse().unwrap(),
-             size.parse().unwrap(),
-             procs.parse().unwrap())
+            (iters.parse().unwrap(), size.parse().unwrap(), procs.parse().unwrap())
         }
         _ => panic!("{} <iters> <size> <procs>", name),
     };
