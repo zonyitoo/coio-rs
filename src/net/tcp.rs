@@ -33,8 +33,9 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use mio::EventSet;
 use mio::tcp::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 
+use sync::condvar::WaiterState;
 use scheduler::ReadyType;
-use super::{each_addr, GenericEvented, SyncGuard};
+use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_tcp_listener {
     ($inner:expr) => (TcpListener::new($inner, EventSet::readable()));
@@ -73,8 +74,16 @@ impl TcpListener {
             }
 
             trace!("TcpListener({:?}): wait(Readable)", self.token);
-            self.ready_states.wait(ReadyType::Readable);
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 

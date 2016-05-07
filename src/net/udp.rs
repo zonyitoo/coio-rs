@@ -30,8 +30,9 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use mio::EventSet;
 use mio::udp::UdpSocket as MioUdpSocket;
 
+use sync::condvar::WaiterState;
 use scheduler::ReadyType;
-use super::{each_addr, GenericEvented, SyncGuard};
+use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_udp_socket {
     ($inner:expr) => (UdpSocket::new($inner, EventSet::readable() | EventSet::writable()));
@@ -70,30 +71,6 @@ impl UdpSocket {
         create_udp_socket!(inner)
     }
 
-    pub fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
-        let mut sync_guard = SyncGuard::new();
-
-        loop {
-            match self.get_inner_mut().send_to(buf, target) {
-                Ok(None) => {
-                    trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
-                }
-                Ok(Some(len)) => {
-                    trace!("UdpSocket({:?}): send_to() => Ok({})", self.token, len);
-                    return Ok(len);
-                }
-                Err(err) => {
-                    trace!("UdpSocket({:?}): send_to() => Err(..)", self.token);
-                    return Err(err);
-                }
-            }
-
-            trace!("UdpSocket({:?}): wait(Writable)", self.token);
-            self.ready_states.wait(ReadyType::Writable);
-            sync_guard.disarm();
-        }
-    }
-
     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let mut sync_guard = SyncGuard::new();
 
@@ -113,8 +90,48 @@ impl UdpSocket {
             }
 
             trace!("UdpSocket({:?}): wait(Readable)", self.token);
-            self.ready_states.wait(ReadyType::Readable);
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner_mut().send_to(buf, target) {
+                Ok(None) => {
+                    trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
+                }
+                Ok(Some(len)) => {
+                    trace!("UdpSocket({:?}): send_to() => Ok({})", self.token, len);
+                    return Ok(len);
+                }
+                Err(err) => {
+                    trace!("UdpSocket({:?}): send_to() => Err(..)", self.token);
+                    return Err(err);
+                }
+            }
+
+            trace!("UdpSocket({:?}): wait(Writable)", self.token);
+            sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Writable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 }

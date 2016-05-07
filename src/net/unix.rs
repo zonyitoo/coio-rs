@@ -32,8 +32,9 @@ use mio::unix::UnixListener as MioUnixListener;
 use mio::unix::UnixSocket as MioUnixSocket;
 use mio::unix::UnixStream as MioUnixStream;
 
+use sync::condvar::WaiterState;
 use scheduler::ReadyType;
-use super::{GenericEvented, SyncGuard};
+use super::{make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_unix_listener {
     ($inner:expr) => (UnixListener::new($inner, EventSet::readable()));
@@ -118,8 +119,16 @@ impl UnixListener {
             }
 
             trace!("UnixListener({:?}): wait(Readable)", self.token);
-            self.ready_states.wait(ReadyType::Readable);
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 

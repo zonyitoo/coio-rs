@@ -38,12 +38,12 @@ extern crate log;
 
 extern crate context;
 extern crate deque;
+extern crate libc;
+extern crate linked_hash_map;
 extern crate mio;
 extern crate rand;
 extern crate slab;
-extern crate linked_hash_map;
 extern crate time;
-extern crate libc;
 
 pub mod join_handle;
 pub mod net;

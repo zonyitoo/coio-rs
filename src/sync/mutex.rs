@@ -28,7 +28,6 @@ use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use sync::semaphore::Semaphore;
-use runtime::notifier::{Notifier, WaiterState};
 use coroutine::HandleList;
 use scheduler::Scheduler;
 
@@ -36,20 +35,22 @@ pub type LockResult<G> = Result<G, PoisonError<G>>;
 pub type TryLockResult<G> = Result<G, PoisonError<G>>;
 
 /// A mutual exclusion primitive useful for protecting shared data
-pub struct Mutex<T> {
-    data: UnsafeCell<T>,
+pub struct Mutex<T: ?Sized> {
     sema: Semaphore,
+    data: UnsafeCell<T>,
 }
 
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state ready for use.
     pub fn new(data: T) -> Mutex<T> {
         Mutex {
-            data: UnsafeCell::new(data),
             sema: Semaphore::new(1),
+            data: UnsafeCell::new(data),
         }
     }
+}
 
+impl<T: ?Sized> Mutex<T> {
     /// Acquires a mutex, blocking the current thread until it is able to do so.
     pub fn lock(&self) -> LockResult<Guard<T>> {
         self.sema.acquire();
@@ -66,18 +67,18 @@ impl<T> Mutex<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Mutex<T> {}
-unsafe impl<T: Sync> Sync for Mutex<T> {}
+unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
 /// An RAII implementation of "scoped lock" of a mutex. When this structure is dropped,
 /// the lock will be unlocked.
 #[must_use]
-pub struct Guard<'a, T: 'a> {
+pub struct Guard<'a, T: ?Sized + 'a> {
     data: &'a mut T,
     mutex: &'a Mutex<T>,
 }
 
-impl<'a, T: 'a> Guard<'a, T> {
+impl<'a, T: ?Sized + 'a> Guard<'a, T> {
     fn new(data: &'a mut T, mutex: &'a Mutex<T>) -> Guard<'a, T> {
         Guard {
             data: data,
@@ -86,7 +87,7 @@ impl<'a, T: 'a> Guard<'a, T> {
     }
 }
 
-impl<'a, T: 'a> Drop for Guard<'a, T> {
+impl<'a, T: ?Sized + 'a> Drop for Guard<'a, T> {
     fn drop(&mut self) {
         self.mutex.sema.release();
     }
@@ -155,76 +156,6 @@ impl<T: Send + Reflect> Error for PoisonError<T> {
     }
 }
 
-pub struct WaitTimeoutResult(bool);
-
-impl WaitTimeoutResult {
-    pub fn timed_out(&self) -> bool {
-        self.0
-    }
-}
-
-/// A Condition variable
-pub struct Condvar {
-    notifier: Notifier,
-}
-
-impl Condvar {
-    /// Creates a new condition variable which is ready to be waited on and notified.
-    pub fn new() -> Condvar {
-        Condvar { notifier: Notifier::default() }
-    }
-
-    /// Blocks the current coroutine until this condition variable receives a notification.
-    pub fn wait<'a, T>(&self, guard: Guard<'a, T>) -> LockResult<Guard<'a, T>> {
-        let mutex = guard.mutex;
-        drop(guard);
-        self.notifier.wait();
-        mutex.lock()
-    }
-
-    /// Waits on this condition variable for a notification, timing out after a specified duration.
-    pub fn wait_timeout<'a, T>(&self,
-                               guard: Guard<'a, T>,
-                               dur: Duration)
-                               -> LockResult<(Guard<'a, T>, WaitTimeoutResult)> {
-        let mutex = guard.mutex;
-        drop(guard);
-        let r = match self.notifier.wait_timeout(dur) {
-            WaiterState::Succeeded => WaitTimeoutResult(false),
-            WaiterState::Timedout => WaitTimeoutResult(true),
-            _ => panic!("Invalid state"),
-        };
-
-        match mutex.lock() {
-            Ok(g) => Ok((g, r)),
-            Err(pg) => Err(PoisonError { guard: (pg.guard, r) }),
-        }
-    }
-
-    /// Wakes up one blocked coroutine on this condvar.
-    pub fn notify_one(&self) {
-        if let Some(hdl) = self.notifier.notify_one(WaiterState::Succeeded) {
-            Scheduler::ready(hdl);
-        }
-    }
-
-    /// Wakes up all blocked coroutine on this condvar.
-    pub fn notify_all(&self) {
-        let mut hlist = HandleList::new();
-        self.notifier.notify_all(WaiterState::Succeeded, &mut hlist);
-
-        while let Some(h) = hlist.pop_front() {
-            Scheduler::ready(h);
-        }
-    }
-}
-
-impl Default for Condvar {
-    fn default() -> Condvar {
-        Condvar::new()
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -264,83 +195,5 @@ mod test {
             .unwrap();
 
         assert_eq!(*num.lock().unwrap(), 1000);
-    }
-
-    #[test]
-    fn condvar_basic() {
-        let pair = Arc::new((Mutex::new(false), Condvar::new()));
-        Scheduler::new()
-            .with_workers(1)
-            .run(move || {
-                let cloned = pair.clone();
-                Scheduler::spawn(move || {
-                    let mut guard = cloned.0.lock().unwrap();
-                    *guard = true;
-                    cloned.1.notify_one();
-                });
-
-                let mut guard = pair.0.lock().unwrap();
-                while !*guard {
-                    guard = pair.1.wait(guard).unwrap();
-                }
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn condvar_timeout() {
-        let pair = Arc::new((Mutex::new(false), Condvar::new()));
-        Scheduler::new()
-            .with_workers(1)
-            .run(move || {
-                let guard = pair.0.lock().unwrap();
-                let (_, t) = pair.1.wait_timeout(guard, Duration::from_millis(1)).unwrap();
-                assert!(t.timed_out());
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn condvar_protected_queue() {
-        let pair = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
-        Scheduler::new()
-            .with_workers(10)
-            .run(move || {
-
-                let cloned_pair = pair.clone();
-                let producer = Scheduler::spawn(move || {
-                    for i in 0..10 {
-                        let mut queue = cloned_pair.0.lock().unwrap();
-                        queue.push_back(i);
-                        cloned_pair.1.notify_one();
-                        Scheduler::sched();
-                    }
-                });
-
-                let mut cons = Vec::with_capacity(10);
-
-                for _ in 0..10 {
-                    let pair = pair.clone();
-                    let consumer = Scheduler::spawn(move || {
-                        let mut queue = pair.0.lock().unwrap();
-                        while queue.is_empty() {
-                            queue = pair.1.wait(queue).unwrap();
-                        }
-
-                        queue.pop_front().unwrap()
-                    });
-                    cons.push(consumer);
-                }
-
-                let mut sum = 0;
-
-                let _ = producer.join();
-                for h in cons {
-                    sum += h.join().unwrap();
-                }
-
-                assert_eq!(sum, 45);
-            })
-            .unwrap();
     }
 }

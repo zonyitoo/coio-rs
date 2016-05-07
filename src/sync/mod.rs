@@ -22,11 +22,28 @@
 
 //! Coroutine synchronization
 
-pub use self::mutex::Mutex;
-pub use self::mutex::Condvar;
-
+pub mod condvar;
 pub mod mono_barrier;
 pub mod mpsc;
 pub mod mutex;
 pub mod semaphore;
 pub mod spinlock;
+
+pub use self::condvar::Condvar;
+pub use self::spinlock::{Spinlock, TicketSpinlock};
+pub use self::mutex::Mutex;
+
+use std::sync;
+
+pub trait Lock<'a> {
+    type Guard;
+    fn lock(&'a self) -> Self::Guard;
+}
+
+impl<'a, T: 'a + ?Sized> Lock<'a> for sync::Mutex<T> {
+    type Guard = sync::MutexGuard<'a, T>;
+
+    fn lock(&'a self) -> Self::Guard {
+        self.lock().unwrap()
+    }
+}

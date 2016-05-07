@@ -126,6 +126,14 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Spinlock<T> {
     }
 }
 
+impl<'a, T: 'a + ?Sized> Lock<'a> for Spinlock<T> {
+    type Guard = SpinlockGuard<'a, T>;
+
+    fn lock(&'a self) -> Self::Guard {
+        self.lock()
+    }
+}
+
 pub struct SpinlockGuard<'a, T: ?Sized + 'a>(&'a AtomicBool, &'a mut T);
 
 impl<'a, T: ?Sized> !Send for SpinlockGuard<'a, T> {}
@@ -207,7 +215,16 @@ impl<T: ?Sized + Default> Default for TicketSpinlock<T> {
 
 impl<T: ?Sized + fmt::Debug> fmt::Debug for TicketSpinlock<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO
         write!(f, "TicketSpinlock {{ <locked> }}")
+    }
+}
+
+impl<'a, T: 'a + ?Sized> Lock<'a> for TicketSpinlock<T> {
+    type Guard = TicketSpinlockGuard<'a, T>;
+
+    fn lock(&'a self) -> Self::Guard {
+        self.lock()
     }
 }
 

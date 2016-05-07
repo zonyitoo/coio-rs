@@ -35,9 +35,9 @@ use std::thread::{self, Builder};
 use rand::{self, Rng};
 
 use coroutine::{Coroutine, State, Handle};
-use scheduler::Scheduler;
 use options::Options;
 use runtime::stack_pool::StackPool;
+use scheduler::Scheduler;
 
 pub const QUEUE_SIZE: usize = 256;
 
@@ -317,8 +317,17 @@ impl Processor {
     /// # Safety
     ///
     /// This method *is* thread safe.
+    // NOTE:
+    //   This is required to be inline(never) due to
+    //   https://github.com/rust-lang/rust/commit/12c5fc5877f708e8e4df05bf834261f5237ac437
+    #[inline(never)]
     pub fn current() -> Option<ProcessorHandle> {
-        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()).as_mut().map(ProcessorHandle) })
+        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()) }).as_mut().map(ProcessorHandle)
+    }
+
+    #[inline(never)]
+    pub fn current_required() -> ProcessorHandle {
+        Processor::current().expect("requires a Processor")
     }
 
     /// Returns the Scheduler associated with this instance.
@@ -372,7 +381,11 @@ impl Processor {
 
     /// Enqueue a coroutine to be resumed as soon as possible (making it the head of the queue)
     pub fn ready(&mut self, coro: Handle) {
-        self.queue_push_back(coro);
+        if self.current_coro.is_none() {
+            self.current_coro = Some(coro);
+        } else {
+            self.queue_push_back(coro);
+        }
     }
 
     /// Suspends the current running coroutine, equivalent to `Scheduler::sched`

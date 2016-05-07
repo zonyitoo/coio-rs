@@ -39,11 +39,10 @@ use slab::Slab;
 use coroutine::{Coroutine, Handle, HandleList};
 use join_handle::{self, JoinHandleReceiver};
 use options::Options;
-use sync::spinlock::Spinlock;
-
 use runtime::processor::{self, Machine, Processor, ProcMessage};
-use runtime::notifier::{Notifier, Waiter, WaiterState};
 use runtime::timer::{Timer, Timeout};
+use sync::condvar::{Condvar as CoroCondvar, Waiter, WaiterState};
+use sync::spinlock::Spinlock;
 
 /// A handle that could join the coroutine
 pub struct JoinHandle<T> {
@@ -114,8 +113,6 @@ unsafe impl Send for Message {}
 pub enum ReadyType {
     Readable = 0,
     Writable,
-    Error,
-    Hup,
 }
 
 impl Into<EventSet> for ReadyType {
@@ -124,39 +121,53 @@ impl Into<EventSet> for ReadyType {
     }
 }
 
+#[derive(Debug)]
+struct ReadyStatesInner {
+    state: Spinlock<EventSet>,
+    condvars: [CoroCondvar<'static, Spinlock<EventSet>>; 2],
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct ReadyStates(Arc<[Notifier; 2]>);
+pub struct ReadyStates {
+    inner: Arc<ReadyStatesInner>,
+}
 
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
-        ReadyStates(Arc::new([Notifier::default(), Notifier::default()]))
+        let ret = ReadyStates {
+            inner: Arc::new(ReadyStatesInner {
+                state: Spinlock::new(EventSet::none()),
+                condvars: [CoroCondvar::new_unbound(), CoroCondvar::new_unbound()],
+            }),
+        };
+
+        ret.inner.condvars[0].set_lock(&ret.inner.state);
+        ret.inner.condvars[1].set_lock(&ret.inner.state);
     }
 
-    #[inline]
-    pub fn wait(&self, ready_type: ReadyType) -> WaiterState {
-        self.0[ready_type as usize].wait()
+    pub fn wait(&self, ready_type: ReadyType) {
+        let state = self.inner.state.lock();
+        let condvar = self.inner.condvars[ready_type as usize];
+        condvar.wait(state);
     }
 
-    #[inline]
-    pub fn wait_timeout(&self, ready_type: ReadyType, dur: Duration) -> WaiterState {
-        self.0[ready_type as usize].wait_timeout(dur)
+    // Returns true on timeout
+    pub fn wait_timeout(&self, ready_type: ReadyType, dur: Duration) -> bool {
+        let state = self.inner.state.lock();
+        let condvar = self.inner.condvars[ready_type as usize];
+        condvar.wait_timeout(state, dur).is_err()
     }
 
     #[inline]
     fn notify(&self, event_set: EventSet, handles: &mut HandleList) {
         if event_set.contains(EventSet::readable()) {
-            self.0[ReadyType::Readable as usize].notify_all(WaiterState::Succeeded, handles);
+            self.inner.condvars[ReadyType::Readable as usize].notify_one();
         }
 
         if event_set.contains(EventSet::writable()) {
-            self.0[ReadyType::Writable as usize].notify_all(WaiterState::Succeeded, handles);
-        }
-
-        if event_set.contains(EventSet::error() | EventSet::hup()) {
-            self.0[ReadyType::Readable as usize].notify_all(WaiterState::Error, handles);
-            self.0[ReadyType::Writable as usize].notify_all(WaiterState::Error, handles);
+            self.inner.condvars[ReadyType::Writable as usize].notify_one();
         }
     }
 }
@@ -339,7 +350,7 @@ impl Scheduler {
                         Some(TimerWaitType::Handle(hdl)) => self.io_handler_queue.push_back(hdl),
                         Some(TimerWaitType::Waiter(waiter_ptr)) => {
                             let waiter = unsafe { &**waiter_ptr };
-                            if let Some(hdl) = waiter.notify(WaiterState::Timedout) {
+                            if let Some(hdl) = waiter.notify(WaiterState::Timeout) {
                                 self.io_handler_queue.push_back(hdl);
                             }
                         }
@@ -414,7 +425,7 @@ impl Scheduler {
             // No matter whether it is panicked or not, the result will be sent to the channel
             let _ = tx.push(ret);
         };
-        let mut processor = Processor::current().expect("Processor required for spawn");
+        let mut processor = Processor::current_required();
         processor.spawn_opts(wrapper, opts);
 
         JoinHandle { result: rx }

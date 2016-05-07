@@ -33,21 +33,21 @@ pub use self::udp::UdpSocket;
 #[cfg(unix)]
 pub use self::unix::{UnixListener, UnixStream, UnixSocket};
 
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::ops::{Deref, DerefMut};
 use std::time::Duration;
-use std::cell::UnsafeCell;
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 
 use mio::{Evented, EventSet, Token};
 
+use sync::condvar::WaiterState;
 use scheduler::{ReadyStates, ReadyType, Scheduler};
 use sync::spinlock::Spinlock;
-use runtime::notifier::WaiterState;
 
 #[cfg(unix)]
 fn make_timeout() -> io::Error {
@@ -65,9 +65,8 @@ fn make_timeout() -> io::Error {
 #[doc(hidden)]
 pub struct GenericEvented<E: Evented + Debug> {
     inner: UnsafeCell<E>,
-    ready_states: ReadyStates,
     token: Token,
-
+    ready_states: ReadyStates,
     read_timeout: Spinlock<Option<Duration>>,
     write_timeout: Spinlock<Option<Duration>>,
 }
@@ -80,9 +79,8 @@ impl<E: Evented + Debug> GenericEvented<E> {
 
         Ok(GenericEvented {
             inner: UnsafeCell::new(inner),
-            ready_states: ready_states,
             token: token,
-
+            ready_states: ready_states,
             read_timeout: Spinlock::default(),
             write_timeout: Spinlock::default(),
         })
@@ -101,7 +99,7 @@ impl<E: Evented + Debug> GenericEvented<E> {
 
 impl<E: Evented + Debug> Drop for GenericEvented<E> {
     fn drop(&mut self) {
-        let scheduler = Scheduler::instance().unwrap();
+        let scheduler = Scheduler::instance().expect("Cannot drop socket outside of Scheduler");
         scheduler.deregister(self.get_inner(), self.token).unwrap();
     }
 }
@@ -154,21 +152,16 @@ impl<'a, E: Evented + Debug + Read + 'a> GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Readable)", self.token);
-
-            let state = match *self.read_timeout.lock() {
-                None => self.ready_states.wait(ReadyType::Readable),
-                Some(t) => self.ready_states.wait_timeout(ReadyType::Readable, t),
-            };
-
-            match state {
-                WaiterState::Error => {
-                    // TODO: How to deal with error?
-                }
-                WaiterState::Timedout => return Err(make_timeout()),
-                _ => {},
-            }
-
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 }
@@ -207,19 +200,16 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
-            let state = match *self.write_timeout.lock() {
-                None => self.ready_states.wait(ReadyType::Writable),
-                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
-            };
-            match state {
-                WaiterState::Error => {
-                    // TODO: How to deal with error?
-                }
-                WaiterState::Timedout => return Err(make_timeout()),
-                _ => {}
-            }
-
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Writable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 
@@ -245,19 +235,16 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
             }
 
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
-            let state = match *self.write_timeout.lock() {
-                None => self.ready_states.wait(ReadyType::Writable),
-                Some(t) => self.ready_states.wait_timeout(ReadyType::Writable, t),
-            };
-            match state {
-                WaiterState::Error => {
-                    // TODO: How to deal with error?
-                }
-                WaiterState::Timedout => return Err(make_timeout()),
-                _ => {},
-            }
-
             sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Writable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Writable, t) {
+                        return Err(make_timeout());
+                    }
+                }
+            }
         }
     }
 }
