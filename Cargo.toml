@@ -14,7 +14,6 @@ name = "coio"
 clap = "2.1"
 env_logger = "0.3"
 num_cpus = "0.2"
-time = "0.1"
 
 [dependencies]
 context = "1.0"
