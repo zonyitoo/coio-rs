@@ -136,28 +136,35 @@ pub struct ReadyStates {
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
+        let state = Spinlock::new(EventSet::none());
+        let condvars = [CoroCondvar::new(&state), CoroCondvar::new(&state)];
+
         let ret = ReadyStates {
             inner: Arc::new(ReadyStatesInner {
-                state: Spinlock::new(EventSet::none()),
-                condvars: [CoroCondvar::new_unbound(), CoroCondvar::new_unbound()],
+                state: state,
+                condvars: condvars,
             }),
         };
 
         ret.inner.condvars[0].set_lock(&ret.inner.state);
         ret.inner.condvars[1].set_lock(&ret.inner.state);
+
+        ret
     }
 
     pub fn wait(&self, ready_type: ReadyType) {
-        let state = self.inner.state.lock();
-        let condvar = self.inner.condvars[ready_type as usize];
-        condvar.wait(state);
+        // let state = self.inner.state.lock();
+        // let condvar = self.inner.condvars[ready_type as usize];
+        // condvar.wait(state);
+
     }
 
     // Returns true on timeout
     pub fn wait_timeout(&self, ready_type: ReadyType, dur: Duration) -> bool {
-        let state = self.inner.state.lock();
-        let condvar = self.inner.condvars[ready_type as usize];
-        condvar.wait_timeout(state, dur).is_err()
+        // let state = self.inner.state.lock();
+        // let condvar = self.inner.condvars[ready_type as usize];
+        // condvar.wait_timeout(state, dur).is_err()
+        false
     }
 
     #[inline]

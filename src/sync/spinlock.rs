@@ -27,6 +27,8 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use sync::Lock;
+
 #[inline(always)]
 fn cpu_relax() {
     if cfg!(any(target_arch = "x86", target_arch = "x86_64")) {

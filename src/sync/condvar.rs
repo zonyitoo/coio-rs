@@ -248,6 +248,7 @@ impl<'a, L: 'a + Lock<'a>> Condvar<'a, L> {
                 Ok(lock.lock())
             }
             WaiterState::Timeout => Err(WaitTimeoutResult(true)),
+            WaiterState::Error => unimplemented!(),
         }
     }
 
