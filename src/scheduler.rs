@@ -248,6 +248,11 @@ impl Scheduler {
             default_handler(panic_info);
         }));
 
+        if self.expected_worker_count > 1 {
+            warn!("It is unsafe to run Scheduler in multithread mode, see \
+                   https://github.com/zonyitoo/coio-rs/issues/56 for details");
+        }
+
         // Timer has to be setup before any kind of operations on it
         self.timer.lock().setup();
 
