@@ -32,7 +32,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 
 use mio::{Evented, EventSet, Token};
 
-use sync::condvar::WaiterState;
 use scheduler::{ReadyStates, ReadyType, Scheduler};
 use sync::spinlock::Spinlock;
 

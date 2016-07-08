@@ -11,11 +11,8 @@ use std::fmt;
 use std::error::Error;
 use std::marker::Reflect;
 use std::ops::{Deref, DerefMut};
-use std::time::Duration;
 
 use sync::semaphore::Semaphore;
-use coroutine::HandleList;
-use scheduler::Scheduler;
 
 pub type LockResult<G> = Result<G, PoisonError<G>>;
 pub type TryLockResult<G> = Result<G, PoisonError<G>>;
@@ -145,8 +142,6 @@ impl<T: Send + Reflect> Error for PoisonError<T> {
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
-    use std::time::Duration;
-    use std::collections::VecDeque;
 
     use scheduler::Scheduler;
 

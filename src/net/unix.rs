@@ -19,7 +19,6 @@ use mio::unix::UnixListener as MioUnixListener;
 use mio::unix::UnixSocket as MioUnixSocket;
 use mio::unix::UnixStream as MioUnixStream;
 
-use sync::condvar::WaiterState;
 use scheduler::ReadyType;
 use super::{make_timeout, GenericEvented, SyncGuard};
 

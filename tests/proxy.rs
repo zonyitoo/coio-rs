@@ -21,7 +21,7 @@ fn proxy_shared_tcp_stream() {
     env_logger::init().unwrap();
 
     Scheduler::new()
-        .with_workers(2)
+        .with_workers(1)
         .run(|| {
             let guard = Arc::new(AtomicBool::new(false));
             let cloned_guard = guard.clone();
@@ -32,7 +32,9 @@ fn proxy_shared_tcp_stream() {
 
                 cloned_guard.store(true, Ordering::Release);
 
-                let (mut stream, _) = listener.accept().unwrap();
+                let (mut stream, addr) = listener.accept().unwrap();
+
+                println!("REMOTE: Connected {:?}", addr);
 
                 // Echo
                 let mut buf = [0u8; 1024];
@@ -69,7 +71,8 @@ fn proxy_shared_tcp_stream() {
 
                 cloned_guard.store(true, Ordering::Release);
 
-                let (stream, _) = listener.accept().unwrap();
+                let (stream, addr) = listener.accept().unwrap();
+                println!("PROXY: Connected {:?}", addr);
                 let stream = Arc::new(stream);
 
                 let remote = TcpStream::connect(REMOTE_ADDR).unwrap();
@@ -78,6 +81,8 @@ fn proxy_shared_tcp_stream() {
                 let cloned_stream = stream.clone();
                 let cloned_remote = remote.clone();
                 Scheduler::spawn(move || {
+                    println!("LOCAL -> REMOTE started");
+
                     let mut buf = [0u8; 1024];
 
                     loop {
@@ -103,6 +108,8 @@ fn proxy_shared_tcp_stream() {
                 });
 
                 Scheduler::spawn(move || {
+                    println!("REMOTE -> LOCAL started");
+
                     let mut buf = [0u8; 1024];
 
                     loop {
@@ -156,6 +163,8 @@ fn proxy_shared_tcp_stream() {
                             }
                         }
                     }
+
+                    println!("LOCAL: Read finished");
                 });
 
                 let writer = Scheduler::spawn(move || {
@@ -165,7 +174,11 @@ fn proxy_shared_tcp_stream() {
 
                         (&*cloned_stream).write_all(&DATA[..]).unwrap();
                         total_sent += DATA.len();
+
+                        Scheduler::sched();
                     }
+
+                    println!("LOCAL: Write finished");
                 });
 
                 reader.join().unwrap();

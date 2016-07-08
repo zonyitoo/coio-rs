@@ -110,8 +110,7 @@ impl Into<EventSet> for ReadyType {
 
 #[derive(Debug)]
 struct ReadyStatesInner {
-    state: Spinlock<EventSet>,
-    condvars: [CoroCondvar<'static, Spinlock<EventSet>>; 2],
+    condvars: [CoroCondvar; 2],
 }
 
 #[doc(hidden)]
@@ -123,45 +122,30 @@ pub struct ReadyStates {
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
-        let state = Spinlock::new(EventSet::none());
-        let condvars = [CoroCondvar::new(&state), CoroCondvar::new(&state)];
+        let stats = ReadyStatesInner { condvars: [CoroCondvar::new(), CoroCondvar::new()] };
 
-        let ret = ReadyStates {
-            inner: Arc::new(ReadyStatesInner {
-                state: state,
-                condvars: condvars,
-            }),
-        };
-
-        ret.inner.condvars[0].set_lock(&ret.inner.state);
-        ret.inner.condvars[1].set_lock(&ret.inner.state);
-
-        ret
+        ReadyStates { inner: Arc::new(stats) }
     }
 
     pub fn wait(&self, ready_type: ReadyType) {
-        // let state = self.inner.state.lock();
-        // let condvar = self.inner.condvars[ready_type as usize];
-        // condvar.wait(state);
-
+        let condvar = &self.inner.condvars[ready_type as usize];
+        condvar.wait();
     }
 
     // Returns true on timeout
     pub fn wait_timeout(&self, ready_type: ReadyType, dur: Duration) -> bool {
-        // let state = self.inner.state.lock();
-        // let condvar = self.inner.condvars[ready_type as usize];
-        // condvar.wait_timeout(state, dur).is_err()
-        false
+        let condvar = &self.inner.condvars[ready_type as usize];
+        condvar.wait_timeout(dur).is_err()
     }
 
     #[inline]
     fn notify(&self, event_set: EventSet, handles: &mut HandleList) {
         if event_set.contains(EventSet::readable()) {
-            self.inner.condvars[ReadyType::Readable as usize].notify_one();
+            self.inner.condvars[ReadyType::Readable as usize].notify_one(handles);
         }
 
         if event_set.contains(EventSet::writable()) {
-            self.inner.condvars[ReadyType::Writable as usize].notify_one();
+            self.inner.condvars[ReadyType::Writable as usize].notify_one(handles);
         }
     }
 }

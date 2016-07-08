@@ -20,7 +20,6 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use mio::EventSet;
 use mio::tcp::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 
-use sync::condvar::WaiterState;
 use scheduler::ReadyType;
 use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 

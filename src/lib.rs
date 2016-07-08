@@ -11,10 +11,8 @@
 #![feature(
     arc_counts,
     asm,
-    extended_compare_and_swap,
     fnbox,
     optin_builtin_traits,
-    panic_handler,
     reflect_marker,
     shared,
 )]

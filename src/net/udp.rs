@@ -17,7 +17,6 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use mio::EventSet;
 use mio::udp::UdpSocket as MioUdpSocket;
 
-use sync::condvar::WaiterState;
 use scheduler::ReadyType;
 use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 
