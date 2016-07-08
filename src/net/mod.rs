@@ -188,7 +188,7 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
             sync_guard.disarm();
 
-            match *self.read_timeout.lock() {
+            match *self.write_timeout.lock() {
                 None => self.ready_states.wait(ReadyType::Writable),
                 Some(t) => {
                     if self.ready_states.wait_timeout(ReadyType::Writable, t) {
@@ -223,7 +223,7 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
             trace!("GenericEvented({:?}): wait(Writable)", self.token);
             sync_guard.disarm();
 
-            match *self.read_timeout.lock() {
+            match *self.write_timeout.lock() {
                 None => self.ready_states.wait(ReadyType::Writable),
                 Some(t) => {
                     if self.ready_states.wait_timeout(ReadyType::Writable, t) {

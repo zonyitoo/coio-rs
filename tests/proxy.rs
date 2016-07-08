@@ -174,8 +174,6 @@ fn proxy_shared_tcp_stream() {
 
                         (&*cloned_stream).write_all(&DATA[..]).unwrap();
                         total_sent += DATA.len();
-
-                        Scheduler::sched();
                     }
 
                     println!("LOCAL: Write finished");

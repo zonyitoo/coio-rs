@@ -60,12 +60,13 @@ impl Waiter {
 
         let mut shared = self.shared.lock();
 
+        if shared.state == WaiterState::Empty {
+            shared.state = t;
+        }
+
         match shared.handle.take() {
             None => None,
-            Some(hdl) => {
-                shared.state = t;
-                Some(hdl)
-            }
+            Some(hdl) => Some(hdl),
         }
     }
 
@@ -76,7 +77,7 @@ impl Waiter {
     pub fn try_wait(&self, coro: Handle) -> Option<Handle> {
         let mut shared = self.shared.lock();
 
-        match shared.state {
+        match mem::replace(&mut shared.state, WaiterState::Empty) {
             WaiterState::Empty => {
                 shared.handle = Some(coro);
                 None
