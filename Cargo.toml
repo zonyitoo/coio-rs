@@ -5,6 +5,7 @@ authors = ["Y. T. Chung <zonyitoo@gmail.com>", "Leonard Hecker <leonard@hecker.i
 description = "Coroutine scheduler with non-blocking I/O support"
 repository = "https://github.com/zonyitoo/coio-rs"
 keywords = ["coroutine", "fiber", "green", "green thread", "non-blocking", "io", "async"]
+license = "MIT/Apache-2.0"
 
 [lib]
 name = "coio"
@@ -13,7 +14,6 @@ name = "coio"
 clap = "2.1"
 env_logger = "0.3"
 num_cpus = "0.2"
-time = "0.1"
 
 [dependencies]
 context = "1.0"
