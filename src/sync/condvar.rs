@@ -137,7 +137,6 @@ impl WaiterList {
         }
     }
 
-    #[allow(dead_code)]
     fn remove(&mut self, waiter: &mut Waiter) {
         let prev = waiter.prev.take();
         let next = waiter.next.take();
@@ -214,6 +213,11 @@ impl Condvar {
 
             drop(guard);
         });
+
+        {
+            let _guard = self.lock.lock();
+            self.get_waiter_list().remove(&mut waiter);
+        }
 
         let p = Processor::current_required();
 
