@@ -14,7 +14,7 @@ env:
 
 script:
     - cargo test
-    - cargo build --manifest-path benchmarks/Cargo.toml
+    # - cargo build --manifest-path benchmarks/Cargo.toml
     - cargo run --example simple
     - cargo run --example panic
     - cargo test --release
