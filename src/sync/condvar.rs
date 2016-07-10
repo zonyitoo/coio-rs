@@ -1,4 +1,3 @@
-use std::cell::UnsafeCell;
 use std::fmt;
 use std::mem;
 use std::ptr::Shared;
@@ -64,10 +63,7 @@ impl Waiter {
             shared.state = t;
         }
 
-        match shared.handle.take() {
-            None => None,
-            Some(hdl) => Some(hdl),
-        }
+        shared.handle.take()
     }
 
     pub fn state(&self) -> WaiterState {
@@ -76,8 +72,7 @@ impl Waiter {
 
     pub fn try_wait(&self, coro: Handle) -> Option<Handle> {
         let mut shared = self.shared.lock();
-
-        match mem::replace(&mut shared.state, WaiterState::Empty) {
+        match shared.state {
             WaiterState::Empty => {
                 shared.handle = Some(coro);
                 None
@@ -168,24 +163,20 @@ impl Default for WaiterList {
 
 /// A Condition variable
 pub struct Condvar {
-    waiter_list: UnsafeCell<WaiterList>,
-    lock: Spinlock<()>,
+    lock: Spinlock<WaiterList>,
 }
 
 impl Condvar {
     pub fn new() -> Condvar {
-        Condvar {
-            waiter_list: Default::default(),
-            lock: Spinlock::new(()),
-        }
+        Condvar { lock: Spinlock::new(Default::default()) }
     }
 
     pub fn wait(&self) {
-        let guard = self.lock.lock();
+        let mut guard = self.lock.lock();
         let p = Processor::current_required();
         let mut waiter = Waiter::new();
 
-        self.get_waiter_list().push_back(&mut waiter);
+        guard.push_back(&mut waiter);
 
         p.park_with(|p, coro| {
             if let Some(coro) = waiter.try_wait(coro) {
@@ -197,11 +188,11 @@ impl Condvar {
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> Result<(), WaitTimeoutResult> {
-        let guard = self.lock.lock();
+        let mut guard = self.lock.lock();
         let p = Processor::current_required();
         let mut waiter = Waiter::new();
 
-        self.get_waiter_list().push_back(&mut waiter);
+        guard.push_back(&mut waiter);
 
         let timeout = p.scheduler().timeout(::duration_to_ms(dur), &mut waiter);
         waiter.set_timeout(timeout);
@@ -215,8 +206,8 @@ impl Condvar {
         });
 
         {
-            let _guard = self.lock.lock();
-            self.get_waiter_list().remove(&mut waiter);
+            let mut guard = self.lock.lock();
+            guard.remove(&mut waiter);
         }
 
         let p = Processor::current_required();
@@ -237,8 +228,8 @@ impl Condvar {
 
     pub fn notify_one(&self, hdl_list: &mut HandleList) {
         let waiter = {
-            let _guard = self.lock.lock();
-            self.get_waiter_list().pop_front()
+            let mut guard = self.lock.lock();
+            guard.pop_front()
         };
 
         if let Some(waiter) = waiter {
@@ -252,8 +243,8 @@ impl Condvar {
 
     pub fn notify_all(&self, hdl_list: &mut HandleList) {
         let mut lst: WaiterList = {
-            let _guard = self.lock.lock();
-            mem::replace(self.get_waiter_list(), Default::default())
+            let mut guard = self.lock.lock();
+            mem::replace(&mut *guard, Default::default())
         };
 
         while let Some(waiter) = lst.pop_front() {
@@ -264,19 +255,14 @@ impl Condvar {
             }
         }
     }
-
-    fn get_waiter_list(&self) -> &mut WaiterList {
-        unsafe { &mut *self.waiter_list.get() }
-    }
 }
 
 impl Drop for Condvar {
     fn drop(&mut self) {
-        let _guard = self.lock.lock();
-        let waiter_list = self.get_waiter_list();
+        let mut guard = self.lock.lock();
         let processor = Processor::current();
 
-        while let Some(waiter) = waiter_list.pop_front() {
+        while let Some(waiter) = guard.pop_front() {
             let waiter = unsafe { &mut **waiter };
 
             if let Some(timeout) = waiter.take_timeout() {
