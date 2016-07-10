@@ -15,6 +15,7 @@ var (
 	testMsgLen  = flag.Int("l", 26, "test message length")
 	testConnNum = flag.Int("c", 50, "test connection number")
 	testSeconds = flag.Int("t", 10, "test duration in seconds")
+	ioTimeout   = flag.Duration("d", 2*time.Second, "timeout for individual read/write operation in seconds")
 )
 
 func main() {
@@ -45,6 +46,8 @@ func main() {
 
 			outer:
 				for {
+
+					conn.SetWriteDeadline(time.Now().Add(*ioTimeout))
 					for rest := l; rest > 0; {
 						i, err := conn.Write(msg)
 						rest -= i
@@ -60,6 +63,7 @@ func main() {
 						break outer
 					}
 
+					conn.SetReadDeadline(time.Now().Add(*ioTimeout))
 					for rest := l; rest > 0; {
 						i, err := conn.Read(recv)
 						rest -= i
