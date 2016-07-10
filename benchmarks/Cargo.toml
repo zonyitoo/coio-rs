@@ -8,7 +8,7 @@ bytes = "0.3"
 clap = "2.1"
 #hyper = "*"
 mio = "0.5"
-mioco = "0.4"
+mioco = "0.7"
 
 [dependencies.log]
 version = "0.3"
