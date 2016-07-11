@@ -41,6 +41,8 @@ func main() {
 
 		go func() {
 			if conn, err := net.DialTimeout("tcp", *targetAddr, time.Minute*99999); err == nil {
+				defer conn.Close()
+
 				l := len(msg)
 				recv := make([]byte, l)
 

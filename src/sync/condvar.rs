@@ -2,6 +2,8 @@ use std::fmt;
 use std::mem;
 use std::ptr::Shared;
 use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cmp;
 
 use coroutine::{Handle, HandleList};
 use runtime::processor::Processor;
@@ -164,27 +166,56 @@ impl Default for WaiterList {
 /// A Condition variable
 pub struct Condvar {
     lock: Spinlock<WaiterList>,
+    token: AtomicUsize,
+    notified: AtomicUsize,
 }
 
 impl Condvar {
     pub fn new() -> Condvar {
-        Condvar { lock: Spinlock::new(Default::default()) }
+        Condvar {
+            lock: Spinlock::new(Default::default()),
+            token: AtomicUsize::new(0),
+            notified: AtomicUsize::new(0),
+        }
+    }
+
+    fn alloc_token(&self) -> usize {
+        self.token.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn check_token(&self, token: usize) -> bool {
+        token < self.notified.load(Ordering::SeqCst)
+    }
+
+    fn notify_token(&self, count: usize) {
+        self.notified.fetch_add(count, Ordering::SeqCst);
     }
 
     pub fn wait(&self) {
-        let mut guard = self.lock.lock();
-        let p = Processor::current_required();
+        let token = self.alloc_token();
+        if self.check_token(token) {
+            return;
+        }
+
         let mut waiter = Waiter::new();
 
-        guard.push_back(&mut waiter);
+        {
+            let waiter = &mut waiter;
+            let p = Processor::current_required();
+            p.park_with(move |p, coro| {
+                let mut guard = self.lock.lock();
+                if self.check_token(token) {
+                    p.ready(coro);
+                    return;
+                }
 
-        p.park_with(|p, coro| {
-            if let Some(coro) = waiter.try_wait(coro) {
-                p.ready(coro);
-            }
+                guard.push_back(waiter);
+                if let Some(coro) = waiter.try_wait(coro) {
+                    p.ready(coro);
+                }
+            });
+        }
 
-            drop(guard);
-        });
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> Result<(), WaitTimeoutResult> {
@@ -239,6 +270,8 @@ impl Condvar {
                 hdl_list.push_back(hdl);
             }
         }
+
+        self.notify_token(1);
     }
 
     pub fn notify_all(&self, hdl_list: &mut HandleList) {
@@ -247,13 +280,18 @@ impl Condvar {
             mem::replace(&mut *guard, Default::default())
         };
 
+        let mut count = 0;
         while let Some(waiter) = lst.pop_front() {
             let waiter = unsafe { &mut **waiter };
 
             if let Some(hdl) = waiter.notify(WaiterState::Succeeded) {
                 hdl_list.push_back(hdl);
             }
+
+            count += 1;
         }
+
+        self.notify_token(cmp::max(count, 1));
     }
 }
 

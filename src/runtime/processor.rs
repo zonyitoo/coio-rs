@@ -368,11 +368,14 @@ impl Processor {
 
     /// Enqueue a coroutine to be resumed as soon as possible (making it the head of the queue)
     pub fn ready(&mut self, coro: Handle) {
-        if self.current_coro.is_none() {
-            self.current_coro = Some(coro);
-        } else {
-            self.queue_push_back(coro);
-        }
+        // FIXME: Do not use self.current_coro here! Which will cause crash!!
+        // if self.current_coro.is_none() {
+        //     self.current_coro = Some(coro);
+        // } else {
+        //     self.queue_push_back(coro);
+        // }
+        //
+        self.queue_push_back(coro);
     }
 
     /// Suspends the current running coroutine, equivalent to `Scheduler::sched`
@@ -717,6 +720,8 @@ impl Processor {
 
         trace!("{:?}: resuming {:?}", self, coro);
         let data = {
+            debug_assert!(self.current_coro.is_none(), "{:?} is still running!", self.current_coro);
+
             self.current_coro = Some(coro);
 
             if let Some(ref mut c) = self.current_coro {
@@ -725,6 +730,8 @@ impl Processor {
                 0
             }
         };
+
+        trace!("{:?}: Coroutine yield back with {:?}", self, self.current_coro);
 
         let mut hdl = None;
         if let Some(coro) = self.current_coro.take() {

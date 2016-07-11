@@ -302,7 +302,8 @@ impl Drop for Handle {
         }
 
         debug_assert!(self.state() == State::Finished,
-                      "Expecting Coroutine to be finished");
+                      "Expecting Coroutine to be finished, found {:?}",
+                      self.state());
 
         // Final step, drop the coroutine
         self.state = State::Dropping;

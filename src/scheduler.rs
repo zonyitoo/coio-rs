@@ -148,10 +148,12 @@ impl ReadyStates {
             self.inner.condvars[ReadyType::Writable as usize].notify_one(handles);
         }
 
-        if event_set.contains(EventSet::error()) || event_set.contains(EventSet::hup()) {
-            self.inner.condvars[ReadyType::Readable as usize].notify_all(handles);
-            self.inner.condvars[ReadyType::Writable as usize].notify_all(handles);
-        }
+        // if event_set.contains(EventSet::error()) || event_set.contains(EventSet::hup()) {
+        //     self.inner.condvars[ReadyType::Readable as usize].notify_all(handles);
+        //     self.inner.condvars[ReadyType::Writable as usize].notify_all(handles);
+        // }
+        //
+
     }
 }
 
