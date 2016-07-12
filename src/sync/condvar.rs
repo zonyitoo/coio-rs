@@ -223,7 +223,7 @@ impl Condvar {
         if self.check_token(token) {
             return Ok(());
         }
-        
+
         let mut waiter = Waiter::new();
 
         {
@@ -235,16 +235,16 @@ impl Condvar {
                     p.ready(coro);
                     return;
                 }
-            
-                waiter.set_timeout(timeout);
+
                 guard.push_back(waiter);
-                let timeout = p.scheduler().timeout(::duration_to_ms(dur), &mut waiter);
+                let timeout = p.scheduler().timeout(::duration_to_ms(dur), waiter);
+                waiter.set_timeout(timeout);
                 if let Some(coro) = waiter.try_wait(coro) {
                     p.ready(coro);
                 }
             });
         }
-        
+
         self.lock.lock().remove(&mut waiter);
 
         let p = Processor::current_required();
