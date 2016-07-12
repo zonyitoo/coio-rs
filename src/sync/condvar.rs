@@ -219,27 +219,33 @@ impl Condvar {
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> Result<(), WaitTimeoutResult> {
-        let mut guard = self.lock.lock();
-        let p = Processor::current_required();
+        let token = self.alloc_token();
+        if self.check_token(token) {
+            return Ok(());
+        }
+        
         let mut waiter = Waiter::new();
 
-        guard.push_back(&mut waiter);
-
-        let timeout = p.scheduler().timeout(::duration_to_ms(dur), &mut waiter);
-        waiter.set_timeout(timeout);
-
-        p.park_with(|p, coro| {
-            if let Some(coro) = waiter.try_wait(coro) {
-                p.ready(coro);
-            }
-
-            drop(guard);
-        });
-
         {
-            let mut guard = self.lock.lock();
-            guard.remove(&mut waiter);
+            let waiter = &mut waiter;
+            let p = Processor::current_required();
+            p.park_with(move |p, coro| {
+                let mut guard = self.lock.lock();
+                if self.check_token(token) {
+                    p.ready(coro);
+                    return;
+                }
+            
+                waiter.set_timeout(timeout);
+                guard.push_back(waiter);
+                let timeout = p.scheduler().timeout(::duration_to_ms(dur), &mut waiter);
+                if let Some(coro) = waiter.try_wait(coro) {
+                    p.ready(coro);
+                }
+            });
         }
+        
+        self.lock.lock().remove(&mut waiter);
 
         let p = Processor::current_required();
 
