@@ -261,8 +261,7 @@ impl Condvar {
         let p = Processor::current_required();
 
         match waiter.state() {
-            WaiterState::Empty => panic!("WaiterState is Empty"),
-            WaiterState::Succeeded => {
+            WaiterState::Empty | WaiterState::Succeeded => {
                 if let Some(timeout) = waiter.take_timeout() {
                     trace!("wait_timeout: Wake up succeeded, cancelling timeout");
                     p.scheduler().cancel_timeout(timeout);
