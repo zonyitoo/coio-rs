@@ -5,6 +5,8 @@
 
 Coroutine scheduling with work-stealing algorithm.
 
+**WARN**: Possibly crash because of TLS inline, check https://github.com/zonyitoo/coio-rs/issues/56 for more detail!
+
 ## Feature
 
 * Non-blocking I/O
