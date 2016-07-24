@@ -217,8 +217,8 @@ impl<T> Timer<T> {
 
                     // Remove and return the token
                     return self.entries
-                               .remove(curr)
-                               .map(|e| e.token);
+                        .remove(curr)
+                        .map(|e| e.token);
                 } else {
                     self.next = links.next;
                 }

@@ -205,12 +205,14 @@ impl Condvar {
             p.park_with(move |p, coro| {
                 let mut guard = self.lock.lock();
                 if self.check_token(token) {
+                    trace!("wait: Wake up {:?} after token check", coro);
                     p.ready(coro);
                     return;
                 }
 
                 guard.push_back(waiter);
                 if let Some(coro) = waiter.try_wait(coro) {
+                    trace!("wait: Wake up {:?} immediately", coro);
                     p.ready(coro);
                 }
             });
@@ -232,14 +234,17 @@ impl Condvar {
             p.park_with(move |p, coro| {
                 let mut guard = self.lock.lock();
                 if self.check_token(token) {
+                    trace!("wait_timeout: Waken up {:?} after token check", coro);
                     p.ready(coro);
                     return;
                 }
 
                 guard.push_back(waiter);
                 let timeout = p.scheduler().timeout(::duration_to_ms(dur), waiter);
+                trace!("wait_timeout: {:?}", dur);
                 waiter.set_timeout(timeout);
                 if let Some(coro) = waiter.try_wait(coro) {
+                    trace!("wait_timeout: Waken up {:?} immediately", coro);
                     p.ready(coro);
                 }
             });
@@ -247,12 +252,15 @@ impl Condvar {
 
         self.lock.lock().remove(&mut waiter);
 
+        trace!("wait_timeout: resuming");
+
         let p = Processor::current_required();
 
         match waiter.state() {
             WaiterState::Empty => panic!("WaiterState is Empty"),
             WaiterState::Succeeded => {
                 if let Some(timeout) = waiter.take_timeout() {
+                    trace!("wait_timeout: Wake up succeeded, cancelling timeout");
                     p.scheduler().cancel_timeout(timeout);
                 }
 
