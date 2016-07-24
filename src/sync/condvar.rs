@@ -241,7 +241,7 @@ impl Condvar {
 
                 guard.push_back(waiter);
                 let timeout = p.scheduler().timeout(::duration_to_ms(dur), waiter);
-                trace!("wait_timeout: {:?}", dur);
+                trace!("wait_timeout: {}ms", ::duration_to_ms(dur));
                 waiter.set_timeout(timeout);
                 if let Some(coro) = waiter.try_wait(coro) {
                     trace!("wait_timeout: Waken up {:?} immediately", coro);
