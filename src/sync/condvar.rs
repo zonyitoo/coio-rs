@@ -194,6 +194,7 @@ impl Condvar {
     pub fn wait(&self) {
         let token = self.alloc_token();
         if self.check_token(token) {
+            trace!("wait: Already notified");
             return;
         }
 
@@ -218,13 +219,17 @@ impl Condvar {
             });
         }
 
+        trace!("wait: resuming");
     }
 
     pub fn wait_timeout(&self, dur: Duration) -> Result<(), WaitTimeoutResult> {
         let token = self.alloc_token();
         if self.check_token(token) {
+            trace!("wait_timeout: Already notified");
             return Ok(());
         }
+
+        trace!("wait_timeout: Wait with timeout: {:?}", dur);
 
         let mut waiter = Waiter::new();
 
@@ -241,7 +246,6 @@ impl Condvar {
 
                 guard.push_back(waiter);
                 let timeout = p.scheduler().timeout(::duration_to_ms(dur), waiter);
-                trace!("wait_timeout: {}ms", ::duration_to_ms(dur));
                 waiter.set_timeout(timeout);
                 if let Some(coro) = waiter.try_wait(coro) {
                     trace!("wait_timeout: Waken up {:?} immediately", coro);
