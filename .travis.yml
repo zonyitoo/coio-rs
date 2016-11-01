@@ -13,10 +13,10 @@ env:
     - RUST_BACKTRACE=1
 
 script:
-    - cargo test
+    - cargo test --no-fail-fast
     # - cargo build --manifest-path benchmarks/Cargo.toml
     - cargo run --example simple
     - cargo run --example panic
-    - cargo test --release
+    - cargo test --release --no-fail-fast
     - cargo run --example simple --release
     - cargo run --example panic --release
