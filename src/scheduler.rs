@@ -198,7 +198,7 @@ impl Scheduler {
             maximum_stack_memory_limit: 2 * 1024 * 1024 * 1024, // 2GB
 
             event_loop_sender: None,
-            slab: Slab::new(1024),
+            slab: Slab::with_capacity(1024),
             timer: Spinlock::new(Timer::new(100, 1_024, 65_536)),
 
             machines: UnsafeCell::new(Vec::new()),
@@ -712,22 +712,20 @@ impl Handler for Scheduler {
             Message::Register(RegisterMessage { cb, coro }) => {
                 trace!("Handler: registering for {:?}", coro);
 
-                if self.slab.remaining() == 0 {
+                if self.slab.available() == 0 {
                     // doubles the size of the slab each time
-                    let grow = self.slab.count();
-                    self.slab.grow(grow);
+                    let grow = self.slab.len();
+                    self.slab.reserve_exact(grow);
                 }
 
-                self.slab.insert_with_opt(move |token| {
-                    let token = unsafe { mem::transmute(token) };
+                if let Some(entry) = self.slab.vacant_entry() {
+                    let token = unsafe { mem::transmute(entry.index()) };
                     let ready_states = ReadyStates::new();
 
                     if (cb)(event_loop, token, ready_states.clone()) {
-                        Some(ready_states)
-                    } else {
-                        None
+                        entry.insert(ready_states);
                     }
-                });
+                }
 
                 trace!("Handler: registering finished for {:?}", coro);
                 self.io_handler_queue.push_back(coro);
