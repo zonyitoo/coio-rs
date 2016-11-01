@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use mio::{Evented, EventLoop, EventLoopConfig, EventSet, Handler, NotifyError, PollOpt, Sender,
-          Token};
+use mio::{Evented, Ready, PollOpt, Token};
+use mio::deprecated::{EventLoop, EventLoopBuilder, Handler, NotifyError, Sender};
 use slab::Slab;
 
 use coroutine::{Coroutine, Handle, HandleList};
@@ -102,8 +102,8 @@ pub enum ReadyType {
     Writable,
 }
 
-impl Into<EventSet> for ReadyType {
-    fn into(self) -> EventSet {
+impl Into<Ready> for ReadyType {
+    fn into(self) -> Ready {
         unsafe { mem::transmute(1usize << self as usize) }
     }
 }
@@ -139,16 +139,16 @@ impl ReadyStates {
     }
 
     #[inline]
-    fn notify(&self, event_set: EventSet, handles: &mut HandleList) {
-        if event_set.contains(EventSet::readable()) {
+    fn notify(&self, event_set: Ready, handles: &mut HandleList) {
+        if event_set.contains(Ready::readable()) {
             self.inner.condvars[ReadyType::Readable as usize].notify_one(handles);
         }
 
-        if event_set.contains(EventSet::writable()) {
+        if event_set.contains(Ready::writable()) {
             self.inner.condvars[ReadyType::Writable as usize].notify_one(handles);
         }
 
-        // if event_set.contains(EventSet::error()) || event_set.contains(EventSet::hup()) {
+        // if event_set.contains(Ready::error()) || event_set.contains(Ready::hup()) {
         //     self.inner.condvars[ReadyType::Readable as usize].notify_all(handles);
         //     self.inner.condvars[ReadyType::Writable as usize].notify_all(handles);
         // }
@@ -198,7 +198,7 @@ impl Scheduler {
             maximum_stack_memory_limit: 2 * 1024 * 1024 * 1024, // 2GB
 
             event_loop_sender: None,
-            slab: Slab::new(1024),
+            slab: Slab::with_capacity(1024),
             timer: Spinlock::new(Timer::new(100, 1_024, 65_536)),
 
             machines: UnsafeCell::new(Vec::new()),
@@ -265,14 +265,14 @@ impl Scheduler {
 
         trace!("creating EventLoop");
 
-        let mut event_loop_config = EventLoopConfig::new();
+        let mut event_loop_config = EventLoopBuilder::new();
         event_loop_config.notify_capacity(4_096);
         event_loop_config.messages_per_tick(4_096);
-        event_loop_config.timer_tick_ms(100);
+        event_loop_config.timer_tick(Duration::from_millis(100));
         event_loop_config.timer_wheel_size(1_024);
         event_loop_config.timer_capacity(65_536);
 
-        let mut event_loop = EventLoop::configured(event_loop_config).unwrap();
+        let mut event_loop = event_loop_config.build().unwrap();
         self.event_loop_sender = Some(event_loop.channel());
 
         let mut result = None;
@@ -328,7 +328,10 @@ impl Scheduler {
                 }
             });
             trace!("run_once({:?})", next_tick);
-            event_loop.run_once(self, next_tick.or(Some(1000))).unwrap();
+
+            let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
+
+            event_loop.run_once(self, next_tick.or(Some(Duration::from_millis(1000)))).unwrap();
 
             {
                 let mut timer = self.timer.lock();
@@ -456,7 +459,7 @@ impl Scheduler {
 
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
-    pub fn register<E>(&self, fd: &E, interest: EventSet) -> io::Result<(Token, ReadyStates)>
+    pub fn register<E>(&self, fd: &E, interest: Ready) -> io::Result<(Token, ReadyStates)>
         where E: Evented + Debug
     {
         trace!("Scheduler: requesting register of {:?} for {:?}",
@@ -693,10 +696,10 @@ impl Handler for Scheduler {
     type Timeout = Token;
     type Message = Message;
 
-    fn ready(&mut self, _event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
+    fn ready(&mut self, _event_loop: &mut EventLoop<Self>, token: Token, events: Ready) {
         trace!("Handler: got {:?} for {:?}", events, token);
 
-        let ready_states = self.slab.get(token.as_usize()).expect("Token must be registered");
+        let ready_states = self.slab.get(token.into()).expect("Token must be registered");
         ready_states.notify(events, &mut self.io_handler_queue)
     }
 
@@ -712,22 +715,20 @@ impl Handler for Scheduler {
             Message::Register(RegisterMessage { cb, coro }) => {
                 trace!("Handler: registering for {:?}", coro);
 
-                if self.slab.remaining() == 0 {
+                if self.slab.available() == 0 {
                     // doubles the size of the slab each time
-                    let grow = self.slab.count();
-                    self.slab.grow(grow);
+                    let grow = self.slab.len();
+                    self.slab.reserve_exact(grow);
                 }
 
-                self.slab.insert_with_opt(move |token| {
-                    let token = unsafe { mem::transmute(token) };
+                if let Some(entry) = self.slab.vacant_entry() {
+                    let token = entry.index().into();
                     let ready_states = ReadyStates::new();
 
                     if (cb)(event_loop, token, ready_states.clone()) {
-                        Some(ready_states)
-                    } else {
-                        None
+                        entry.insert(ready_states);
                     }
-                });
+                }
 
                 trace!("Handler: registering finished for {:?}", coro);
                 self.io_handler_queue.push_back(coro);
@@ -735,7 +736,7 @@ impl Handler for Scheduler {
             Message::Deregister(msg) => {
                 trace!("Handler: deregistering for {:?}", msg.coro);
 
-                let _ = self.slab.remove(unsafe { mem::transmute(msg.token) });
+                let _ = self.slab.remove(msg.token.into());
 
                 (msg.cb)(event_loop);
 

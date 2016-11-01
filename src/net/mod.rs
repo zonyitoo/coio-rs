@@ -30,7 +30,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use mio::{Evented, EventSet, Token};
+use mio::{Evented, Ready, Token};
 
 use scheduler::{ReadyStates, ReadyType, Scheduler};
 use sync::spinlock::Spinlock;
@@ -59,7 +59,7 @@ pub struct GenericEvented<E: Evented + Debug> {
 
 impl<E: Evented + Debug> GenericEvented<E> {
     #[doc(hidden)]
-    pub fn new(inner: E, interest: EventSet) -> io::Result<GenericEvented<E>> {
+    pub fn new(inner: E, interest: Ready) -> io::Result<GenericEvented<E>> {
         let scheduler = try!(Scheduler::instance_or_err());
         let (token, ready_states) = try!(scheduler.register(&inner, interest));
 

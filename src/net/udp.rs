@@ -14,19 +14,21 @@ use std::net::{SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, RawFd};
 
-use mio::EventSet;
+use mio::Ready;
 use mio::udp::UdpSocket as MioUdpSocket;
 
 use scheduler::ReadyType;
 use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_udp_socket {
-    ($inner:expr) => (UdpSocket::new($inner, EventSet::readable() | EventSet::writable()));
+    ($inner:expr) => (UdpSocket::new($inner, Ready::readable() | Ready::writable()));
 }
 
 pub type UdpSocket = GenericEvented<MioUdpSocket>;
 
 impl UdpSocket {
+
+    /*
     /// Returns a new, unbound, non-blocking, IPv4 UDP socket
     pub fn v4() -> io::Result<UdpSocket> {
         let inner = try!(MioUdpSocket::v4());
@@ -38,17 +40,12 @@ impl UdpSocket {
         let inner = try!(MioUdpSocket::v6());
         create_udp_socket!(inner)
     }
+    */
 
     pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
         each_addr(addr, |addr| {
-            let sock = try!(match *addr {
-                SocketAddr::V4(..) => Self::v4(),
-                SocketAddr::V6(..) => Self::v6(),
-            });
-
-            try!(sock.bind(addr));
-
-            Ok(sock)
+            let inner = try!(MioUdpSocket::bind(addr));
+            create_udp_socket!(inner)
         })
     }
 
