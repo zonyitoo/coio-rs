@@ -47,7 +47,7 @@ impl<T> Timer<T> {
     pub fn new(tick_ms: u64, slots: usize, capacity: usize) -> Timer<T> {
         let mut timer = Timer {
             tick_ms: tick_ms,
-            entries: Slab::with_capacity(capacity.next_power_of_two()),
+            entries: Slab::new(capacity.next_power_of_two()),
             wheel: Vec::new(),
             start: 0,
             tick: 0,
@@ -63,12 +63,12 @@ impl<T> Timer<T> {
     #[allow(dead_code)]
     #[inline]
     pub fn count(&self) -> usize {
-        self.entries.len()
+        self.entries.count()
     }
 
     // Number of ms remaining until the next tick
     pub fn next_tick_in_ms(&self) -> Option<u64> {
-        if self.entries.len() == 0 {
+        if self.entries.count() == 0 {
             return None;
         }
 
@@ -137,9 +137,9 @@ impl<T> Timer<T> {
         let slot = (tick & self.mask) as usize;
         let curr = self.wheel[slot];
 
-        if !self.entries.has_available() {
-            let grow_by = self.entries.len() >> 1;
-            self.entries.reserve_exact(grow_by);
+        if !self.entries.has_remaining() {
+            let grow_by = self.entries.count() >> 1;
+            self.entries.grow(grow_by);
         }
 
         // Insert the new entry
@@ -255,7 +255,6 @@ impl<T> Timer<T> {
 
 // Doubly linked list of timer entries. Allows for efficient insertion /
 // removal of timeouts.
-#[derive(Debug)]
 struct Entry<T> {
     token: T,
     links: EntryLinks,
@@ -274,7 +273,7 @@ impl<T> Entry<T> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 struct EntryLinks {
     tick: u64,
     prev: Token,

@@ -12,29 +12,30 @@ use std::io;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::Path;
 
-use mio::Ready;
-use mio::deprecated::unix::PipeReader as MioPipeReader;
-use mio::deprecated::unix::PipeWriter as MioPipeWriter;
-use mio::deprecated::unix::UnixListener as MioUnixListener;
-use mio::deprecated::unix::UnixSocket as MioUnixSocket;
-use mio::deprecated::unix::UnixStream as MioUnixStream;
+use mio::EventSet;
+use mio::unix::PipeReader as MioPipeReader;
+use mio::unix::PipeWriter as MioPipeWriter;
+use mio::unix::UnixListener as MioUnixListener;
+use mio::unix::UnixSocket as MioUnixSocket;
+use mio::unix::UnixStream as MioUnixStream;
 
-use super::GenericEvented;
+use scheduler::ReadyType;
+use super::{make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_unix_listener {
-    ($inner:expr) => (UnixListener::new($inner, Ready::readable()));
+    ($inner:expr) => (UnixListener::new($inner, EventSet::readable()));
 }
 
 macro_rules! create_unix_stream {
-    ($inner:expr) => (UnixStream::new($inner, Ready::readable() | Ready::writable()));
+    ($inner:expr) => (UnixStream::new($inner, EventSet::readable() | EventSet::writable()));
 }
 
 macro_rules! create_pipe_reader {
-    ($inner:expr) => (PipeReader::new($inner, Ready::readable()));
+    ($inner:expr) => (PipeReader::new($inner, EventSet::readable()));
 }
 
 macro_rules! create_pipe_writer {
-    ($inner:expr) => (PipeWriter::new($inner, Ready::writable()));
+    ($inner:expr) => (PipeWriter::new($inner, EventSet::writable()));
 }
 
 #[derive(Debug)]
@@ -86,14 +87,33 @@ impl UnixListener {
     }
 
     pub fn accept(&self) -> io::Result<UnixStream> {
-        match self.get_inner().accept() {
-            Ok(stream) => {
-                trace!("UnixListener({:?}): accept() => Ok(..)", self.token);
-                return create_unix_stream!(stream);
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner().accept() {
+                Ok(None) => {
+                    trace!("UnixListener({:?}): accept() => WouldBlock", self.token);
+                }
+                Ok(Some(stream)) => {
+                    trace!("UnixListener({:?}): accept() => Ok(..)", self.token);
+                    return create_unix_stream!(stream);
+                }
+                Err(err) => {
+                    trace!("UnixListener({:?}): accept() => Err(..)", self.token);
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                trace!("UnixListener({:?}): accept() => Err(..)", self.token);
-                return Err(err);
+
+            trace!("UnixListener({:?}): wait(Readable)", self.token);
+            sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
             }
         }
     }
@@ -133,7 +153,7 @@ impl FromRawFd for UnixStream {
 }
 
 pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
-    let (reader, writer) = try!(::mio::deprecated::unix::pipe());
+    let (reader, writer) = try!(::mio::unix::pipe());
     let reader = try!(create_pipe_reader!(reader));
     let writer = try!(create_pipe_writer!(writer));
     Ok((reader, writer))

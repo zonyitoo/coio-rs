@@ -11,18 +11,18 @@ license = "MIT/Apache-2.0"
 name = "coio"
 
 [dev-dependencies]
-clap = "2.16"
+clap = "2.1"
 env_logger = "0.3"
-num_cpus = "1.1"
+num_cpus = "0.2"
 
 [dependencies]
 context = "1.0"
 deque = "0.3"
 libc = "0.2"
-linked-hash-map = "0.3.0"
-mio = "0.6"
+linked-hash-map = "0.0.9"
+mio = "0.5"
 rand = "0.3"
-slab = "0.3.0"
+slab = { git = "https://github.com/carllerche/slab.git", rev = "44f9f41a1680e69db7d370d1912898fb0f90b1f8" }
 time = "0.1"
 
 [dependencies.log]
