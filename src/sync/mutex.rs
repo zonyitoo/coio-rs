@@ -9,7 +9,6 @@
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::error::Error;
-use std::marker::Reflect;
 use std::ops::{Deref, DerefMut};
 
 use sync::semaphore::Semaphore;
@@ -133,7 +132,7 @@ impl<T> fmt::Display for PoisonError<T> {
     }
 }
 
-impl<T: Send + Reflect> Error for PoisonError<T> {
+impl<T> Error for PoisonError<T> {
     fn description(&self) -> &str {
         "poisoned lock: another task failed inside"
     }
