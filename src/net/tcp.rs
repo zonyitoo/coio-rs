@@ -20,7 +20,8 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use mio::Ready;
 use mio::tcp::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 
-use super::{each_addr, GenericEvented};
+use scheduler::ReadyType;
+use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_tcp_listener {
     ($inner:expr) => (TcpListener::new($inner, Ready::readable()));
@@ -41,14 +42,33 @@ impl TcpListener {
     }
 
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
-        match self.get_inner().accept() {
-            Ok((stream, addr)) => {
-                trace!("TcpListener({:?}): accept() => Ok(..)", self.token);
-                return create_tcp_stream!(stream).map(|stream| (stream, addr));
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner().accept() {
+                Ok((stream, addr)) => {
+                    trace!("TcpListener({:?}): accept() => Ok(..)", self.token);
+                    return create_tcp_stream!(stream).map(|stream| (stream, addr));
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    trace!("TcpListener({:?}): accept() => WouldBlock", self.token);
+                }
+                Err(err) => {
+                    trace!("TcpListener({:?}): accept() => Err(..)", self.token);
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                trace!("TcpListener({:?}): accept() => Err(..)", self.token);
-                return Err(err);
+
+            trace!("TcpListener({:?}): wait(Readable)", self.token);
+            sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
             }
         }
     }

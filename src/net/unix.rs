@@ -19,7 +19,8 @@ use mio::deprecated::unix::UnixListener as MioUnixListener;
 use mio::deprecated::unix::UnixSocket as MioUnixSocket;
 use mio::deprecated::unix::UnixStream as MioUnixStream;
 
-use super::GenericEvented;
+use scheduler::ReadyType;
+use super::{make_timeout, GenericEvented, SyncGuard};
 
 macro_rules! create_unix_listener {
     ($inner:expr) => (UnixListener::new($inner, Ready::readable()));
@@ -86,14 +87,33 @@ impl UnixListener {
     }
 
     pub fn accept(&self) -> io::Result<UnixStream> {
-        match self.get_inner().accept() {
-            Ok(stream) => {
-                trace!("UnixListener({:?}): accept() => Ok(..)", self.token);
-                return create_unix_stream!(stream);
+        let mut sync_guard = SyncGuard::new();
+
+        loop {
+            match self.get_inner().accept() {
+                Ok(stream) => {
+                    trace!("UnixListener({:?}): accept() => Ok(..)", self.token);
+                    return create_unix_stream!(stream);
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    trace!("UnixListener({:?}): accept() => WouldBlock", self.token);
+                }
+                Err(err) => {
+                    trace!("UnixListener({:?}): accept() => Err(..)", self.token);
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                trace!("UnixListener({:?}): accept() => Err(..)", self.token);
-                return Err(err);
+
+            trace!("UnixListener({:?}): wait(Readable)", self.token);
+            sync_guard.disarm();
+
+            match *self.read_timeout.lock() {
+                None => self.ready_states.wait(ReadyType::Readable),
+                Some(t) => {
+                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                        return Err(make_timeout());
+                    }
+                }
             }
         }
     }
