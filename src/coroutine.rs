@@ -630,7 +630,7 @@ mod test {
 
     #[test]
     fn coroutine_size() {
-        let size = 2 * mem::size_of::<usize>();
+        let size = mem::size_of::<usize>();
         assert_eq!(mem::size_of::<Handle>(), size);
         assert_eq!(mem::size_of::<Option<Handle>>(), size);
     }
