@@ -9,7 +9,7 @@
 //! Global coroutine scheduler
 
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::io::{self, Write};
 use std::mem;
 use std::panic;
@@ -18,9 +18,11 @@ use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
+use std::usize;
 
 use mio::{Evented, Ready, PollOpt, Token};
-use mio::deprecated::{EventLoop, EventLoopBuilder, Handler, NotifyError, Sender};
+use mio::{self, Poll, Events};
+use mio::channel::Sender;
 use slab::Slab;
 
 use coroutine::{Coroutine, Handle, HandleList};
@@ -46,8 +48,8 @@ impl<T> JoinHandle<T> {
 }
 
 
-type RegisterCallback<'a> = &'a mut FnMut(&mut EventLoop<Scheduler>, Token, ReadyStates) -> bool;
-type DeregisterCallback<'a> = &'a mut FnMut(&mut EventLoop<Scheduler>);
+type RegisterCallback<'a> = &'a mut FnMut(&mut Poll, Token, ReadyStates) -> bool;
+type DeregisterCallback<'a> = &'a mut FnMut(&mut Poll);
 
 #[doc(hidden)]
 pub struct RegisterMessage {
@@ -93,6 +95,16 @@ pub enum Message {
 
 unsafe impl Send for Message {}
 
+impl Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Message::Unfreeze => write!(f, "Unfreeze"),
+            &Message::Register(..) => write!(f, "Register(..)"),
+            &Message::Deregister(..) => write!(f, "Deregister(..)"),
+            &Message::Shutdown => write!(f, "Shutdown"),
+        }
+    }
+}
 
 #[doc(hidden)]
 #[repr(usize)]
@@ -265,19 +277,20 @@ impl Scheduler {
 
         trace!("creating EventLoop");
 
-        let mut event_loop_config = EventLoopBuilder::new();
-        event_loop_config.notify_capacity(4_096);
-        event_loop_config.messages_per_tick(4_096);
-        event_loop_config.timer_tick(Duration::from_millis(100));
-        event_loop_config.timer_wheel_size(1_024);
-        event_loop_config.timer_capacity(65_536);
+        let mut event_loop = Poll::new().unwrap();
 
-        let mut event_loop = event_loop_config.build().unwrap();
-        self.event_loop_sender = Some(event_loop.channel());
+        let (tx, rx) = mio::channel::channel();
+        // FIXME: I use Token(0) expr right here because const_fn is still unstable
+        // It should be replaced by a const definition
+        event_loop.register(&rx, Token(0), Ready::all(), PollOpt::edge()).unwrap();
+        // Occupy the 0 index in slab
+        self.slab.insert(ReadyStates::new()).unwrap();
+
+        self.event_loop_sender = Some(tx.clone());
 
         let mut result = None;
 
-        let cloned_event_loop_sender = event_loop.channel();
+        let cloned_event_loop_sender = tx;
         {
             let result = unsafe { &mut *(&mut result as *mut _) };
             let wrapper = move || {
@@ -316,7 +329,9 @@ impl Scheduler {
 
         trace!("running EventLoop");
 
-        while event_loop.is_running() {
+        let mut events = Events::with_capacity(1024);
+
+        'sched_loop: loop {
             let next_tick = self.timer.lock().next_tick_in_ms();
             let next_tick = next_tick.map(|ms| {
                 if ms > usize::max_value() as u64 {
@@ -331,7 +346,28 @@ impl Scheduler {
 
             let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
 
-            event_loop.run_once(self, next_tick.or(Some(Duration::from_millis(1000)))).unwrap();
+            event_loop.poll(&mut events, next_tick.or(Some(Duration::from_millis(1000)))).unwrap();
+
+            // FIXME: Rightnow for migrating from MIO v0.5 to v0.6, I chose to iterate every events in the
+            // list and call the old Handler interface.
+            // Maybe we can handle all the event in a batch
+            for event in events.iter() {
+                match event.token() {
+                    // Token(0) represents loop channel receiver
+                    Token(0) => {
+                        // This is a channel
+                        while let Ok(t) = rx.try_recv() {
+                            match t {
+                                Message::Shutdown => break 'sched_loop,
+                                t => self.io_notify(&mut event_loop, t),
+                            }
+                        }
+                    }
+                    token => {
+                        self.io_ready(&mut event_loop, token, event.kind());
+                    }
+                }
+            }
 
             {
                 let mut timer = self.timer.lock();
@@ -469,7 +505,7 @@ impl Scheduler {
         let mut ret = Err(io::Error::from_raw_os_error(0));
 
         {
-            let mut cb = |evloop: &mut EventLoop<Scheduler>, token, ready_states| {
+            let mut cb = |evloop: &mut Poll, token, ready_states| {
                 trace!("Scheduler: register of {:?} for {:?}", fd, interest);
                 let r = evloop.register(fd, token, interest, PollOpt::edge());
 
@@ -488,11 +524,8 @@ impl Scheduler {
 
             Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                let mut msg = Message::Register(RegisterMessage::new(coro, cb));
-
-                while let Err(NotifyError::Full(m)) = channel.send(msg) {
-                    msg = m;
-                }
+                let msg = Message::Register(RegisterMessage::new(coro, cb));
+                channel.send(msg).expect("Send msg error");
             });
         }
 
@@ -508,7 +541,7 @@ impl Scheduler {
         let mut ret = Ok(());
 
         {
-            let mut cb = |evloop: &mut EventLoop<Scheduler>| {
+            let mut cb = |evloop: &mut Poll| {
                 trace!("Scheduler: deregister of {:?}", fd);
                 ret = evloop.deregister(fd);
             };
@@ -516,14 +549,8 @@ impl Scheduler {
 
             Scheduler::park_with(|_, coro| {
                 let channel = self.event_loop_sender.as_ref().unwrap();
-                let mut msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
-
-                loop {
-                    match channel.send(msg) {
-                        Err(NotifyError::Full(m)) => msg = m,
-                        _ => break,
-                    }
-                }
+                let msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
+                channel.send(msg).expect("Send msg error");
             });
         }
 
@@ -674,8 +701,7 @@ impl Scheduler {
     pub fn unpark_processor_maybe(&self, max: usize) {
         let idle_processor_count = self.idle_processor_count.load(Ordering::Relaxed);
 
-        if max > 0 && idle_processor_count > 0 &&
-           self.spinning_processor_count.load(Ordering::Relaxed) == 0 {
+        if max > 0 && idle_processor_count > 0 && self.spinning_processor_count.load(Ordering::Relaxed) == 0 {
             let cnt = if idle_processor_count < max {
                 idle_processor_count
             } else {
@@ -692,24 +718,16 @@ impl Scheduler {
 
 unsafe impl Send for Scheduler {}
 
-impl Handler for Scheduler {
-    type Timeout = Token;
-    type Message = Message;
-
-    fn ready(&mut self, _event_loop: &mut EventLoop<Self>, token: Token, events: Ready) {
+// Handles MIO events
+impl Scheduler {
+    fn io_ready(&mut self, _event_loop: &mut Poll, token: Token, events: Ready) {
         trace!("Handler: got {:?} for {:?}", events, token);
 
         let ready_states = self.slab.get(token.into()).expect("Token must be registered");
         ready_states.notify(events, &mut self.io_handler_queue)
     }
 
-    fn timeout(&mut self, _event_loop: &mut EventLoop<Self>, token: Token) {
-        let coro = unsafe { Handle::from_raw(mem::transmute(token)) };
-        trace!("Handler: timout for {:?}", coro);
-        self.io_handler_queue.push_back(coro);
-    }
-
-    fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
+    fn io_notify(&mut self, event_loop: &mut Poll, msg: Message) {
         match msg {
             Message::Unfreeze => {}
             Message::Register(RegisterMessage { cb, coro }) => {
@@ -745,7 +763,8 @@ impl Handler for Scheduler {
             }
             Message::Shutdown => {
                 trace!("Handler: shutting down");
-                event_loop.shutdown();
+                let channel = self.event_loop_sender.as_ref().unwrap();
+                channel.send(Message::Shutdown).expect("Send msg error");
             }
         }
     }
