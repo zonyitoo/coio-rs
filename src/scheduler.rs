@@ -199,6 +199,8 @@ pub struct Scheduler {
     global_queue_size: AtomicUsize,
     global_queue: Mutex<HandleList>,
     io_handler_queue: HandleList,
+
+    is_running: bool,
 }
 
 impl Scheduler {
@@ -223,6 +225,8 @@ impl Scheduler {
             global_queue_size: AtomicUsize::new(0),
             global_queue: Mutex::new(HandleList::new()),
             io_handler_queue: HandleList::new(),
+
+            is_running: false,
         }
     }
 
@@ -250,6 +254,7 @@ impl Scheduler {
               T: Send + 'static
     {
         trace!("setting custom panic hook");
+        self.is_running = true;
 
         let default_handler = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
@@ -331,7 +336,7 @@ impl Scheduler {
 
         let mut events = Events::with_capacity(1024);
 
-        'sched_loop: loop {
+        while self.is_running {
             let next_tick = self.timer.lock().next_tick_in_ms();
             let next_tick = next_tick.map(|ms| {
                 if ms > usize::max_value() as u64 {
@@ -357,10 +362,7 @@ impl Scheduler {
                     Token(0) => {
                         // This is a channel
                         while let Ok(t) = rx.try_recv() {
-                            match t {
-                                Message::Shutdown => break 'sched_loop,
-                                t => self.io_notify(&mut event_loop, t),
-                            }
+                            self.io_notify(&mut event_loop, t);
                         }
                     }
                     token => {
@@ -763,8 +765,7 @@ impl Scheduler {
             }
             Message::Shutdown => {
                 trace!("Handler: shutting down");
-                let channel = self.event_loop_sender.as_ref().unwrap();
-                channel.send(Message::Shutdown).expect("Send msg error");
+                self.is_running = false;
             }
         }
     }
