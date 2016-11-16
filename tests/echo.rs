@@ -7,6 +7,7 @@
 // except according to those terms.
 
 extern crate coio;
+extern crate env_logger;
 
 use std::io::{Read, Write};
 
@@ -15,6 +16,8 @@ use coio::net::{TcpListener, TcpStream, UdpSocket};
 
 #[test]
 fn test_tcp_echo() {
+    let _ = env_logger::init();
+
     Scheduler::new()
         .run(move || {
             let acceptor = TcpListener::bind("127.0.0.1:6789").unwrap();
@@ -31,16 +34,16 @@ fn test_tcp_echo() {
                     }
 
                     stream.write_all(&buf[..len])
-                          .and_then(|_| stream.flush())
-                          .unwrap();
+                        .and_then(|_| stream.flush())
+                        .unwrap();
                 }
             });
 
             let sender_fut = Scheduler::spawn(move || {
                 let mut stream = TcpStream::connect("127.0.0.1:6789").unwrap();
                 stream.write_all(b"abcdefg")
-                      .and_then(|_| stream.flush())
-                      .unwrap();
+                    .and_then(|_| stream.flush())
+                    .unwrap();
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
@@ -55,6 +58,8 @@ fn test_tcp_echo() {
 
 #[test]
 fn test_udp_echo() {
+    let _ = env_logger::init();
+
     Scheduler::new()
         .run(move || {
             const TEST_SLICE: &'static [u8] = b"abcdefg";
@@ -87,6 +92,8 @@ fn test_udp_echo() {
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_echo() {
+    let _ = env_logger::init();
+
     use coio::net::{UnixStream, UnixListener};
     use std::fs;
 
@@ -104,15 +111,15 @@ fn test_unix_socket_echo() {
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
                 stream.write_all(&buf[..len])
-                      .and_then(|_| stream.flush())
-                      .unwrap();
+                    .and_then(|_| stream.flush())
+                    .unwrap();
             });
 
             let sender_fut = Scheduler::spawn(move || {
                 let mut stream = UnixStream::connect(&FILE_PATH_STR).unwrap();
                 stream.write_all(b"abcdefg")
-                      .and_then(|_| stream.flush())
-                      .unwrap();
+                    .and_then(|_| stream.flush())
+                    .unwrap();
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
