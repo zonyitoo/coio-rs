@@ -138,7 +138,3 @@ fn main() {
 ## Basic Benchmarks
 
 See [benchmarks](benchmarks) for more details.
-
-## Projects using coio
-
-* [shadowsocks-rust](https://github.com/zonyitoo/shadowsocks-rust) - shadowsocks is a fast tunnel proxy that helps you bypass firewalls.
