@@ -9,7 +9,6 @@
 //! Coroutine scheduling with asynchronous I/O support
 
 #![feature(
-    arc_counts,
     asm,
     fnbox,
     optin_builtin_traits,
@@ -171,10 +170,6 @@ mod test {
 
     #[test]
     fn test_sleep_ms() {
-        Scheduler::new()
-            .run(|| {
-                sleep_ms(1000);
-            })
-            .unwrap();
+        Scheduler::new().run(|| { sleep_ms(1000); }).unwrap();
     }
 }

@@ -48,10 +48,10 @@ impl Waiter {
             next: None,
 
             shared: Spinlock::new(SharedWaiter {
-                handle: None,
-                state: WaiterState::Empty,
-                timeout: None,
-            }),
+                                      handle: None,
+                                      state: WaiterState::Empty,
+                                      timeout: None,
+                                  }),
         }
     }
 
@@ -106,12 +106,13 @@ impl WaiterList {
                 self.head = node;
                 self.tail = node;
             }
-            Some(tail) => {
+            Some(mut tail) => {
                 let node = Some(unsafe { Shared::new(waiter) });
-                let tail_ref = unsafe { &mut **tail };
-
-                self.tail = node;
-                tail_ref.next = node;
+                {
+                    let tail_ref = unsafe { &mut *tail.as_mut() };
+                    self.tail = node;
+                    tail_ref.next = node;
+                }
                 waiter.prev = Some(tail);
             }
         }
@@ -120,11 +121,11 @@ impl WaiterList {
     fn pop_front(&mut self) -> Option<Shared<Waiter>> {
         match self.head.take() {
             None => None,
-            Some(head) => {
-                match unsafe { &mut **head }.next.take() {
+            Some(mut head) => {
+                match unsafe { &mut *head.as_mut() }.next.take() {
                     None => self.tail = None,
-                    Some(next) => {
-                        unsafe { &mut **next }.prev = None;
+                    Some(mut next) => {
+                        unsafe { &mut *next.as_mut() }.prev = None;
                         self.head = Some(next);
                     }
                 }
@@ -138,15 +139,15 @@ impl WaiterList {
         let prev = waiter.prev.take();
         let next = waiter.next.take();
 
-        if let Some(prev) = prev {
-            let prev = unsafe { &mut **prev };
+        if let Some(mut prev) = prev {
+            let prev = unsafe { &mut *prev.as_mut() };
             prev.next = next;
         } else {
             self.head = next;
         }
 
-        if let Some(next) = next {
-            let next = unsafe { &mut **next };
+        if let Some(mut next) = next {
+            let next = unsafe { &mut *next.as_mut() };
             next.prev = prev;
         } else {
             self.tail = prev;
@@ -280,8 +281,8 @@ impl Condvar {
             guard.pop_front()
         };
 
-        if let Some(waiter) = waiter {
-            let waiter = unsafe { &mut **waiter };
+        if let Some(mut waiter) = waiter {
+            let waiter = unsafe { &mut *waiter.as_mut() };
 
             if let Some(hdl) = waiter.notify(WaiterState::Succeeded) {
                 hdl_list.push_back(hdl);
@@ -298,8 +299,8 @@ impl Condvar {
         };
 
         let mut count = 0;
-        while let Some(waiter) = lst.pop_front() {
-            let waiter = unsafe { &mut **waiter };
+        while let Some(mut waiter) = lst.pop_front() {
+            let waiter = unsafe { &mut *waiter.as_mut() };
 
             if let Some(hdl) = waiter.notify(WaiterState::Succeeded) {
                 hdl_list.push_back(hdl);
@@ -317,8 +318,8 @@ impl Drop for Condvar {
         let mut guard = self.lock.lock();
         let processor = Processor::current();
 
-        while let Some(waiter) = guard.pop_front() {
-            let waiter = unsafe { &mut **waiter };
+        while let Some(mut waiter) = guard.pop_front() {
+            let waiter = unsafe { &mut *waiter.as_mut() };
 
             if let Some(timeout) = waiter.take_timeout() {
                 if let Some(ref p) = processor {

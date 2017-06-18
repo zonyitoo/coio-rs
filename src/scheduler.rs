@@ -287,7 +287,9 @@ impl Scheduler {
         let (tx, rx) = mio::channel::channel();
         // FIXME: I use Token(0) expr right here because const_fn is still unstable
         // It should be replaced by a const definition
-        event_loop.register(&rx, Token(0), Ready::all(), PollOpt::edge()).unwrap();
+        event_loop
+            .register(&rx, Token(0), Ready::all(), PollOpt::edge())
+            .unwrap();
         // Occupy the 0 index in slab
         self.slab.insert(ReadyStates::new()).unwrap();
 
@@ -338,20 +340,20 @@ impl Scheduler {
 
         while self.is_running {
             let next_tick = self.timer.lock().next_tick_in_ms();
-            let next_tick = next_tick.map(|ms| {
-                if ms > usize::max_value() as u64 {
-                    usize::max_value()
-                } else if ms < usize::min_value() as u64 {
-                    usize::min_value()
-                } else {
-                    ms as usize
-                }
-            });
+            let next_tick = next_tick.map(|ms| if ms > usize::max_value() as u64 {
+                                              usize::max_value()
+                                          } else if ms < usize::min_value() as u64 {
+                                              usize::min_value()
+                                          } else {
+                                              ms as usize
+                                          });
             trace!("run_once({:?})", next_tick);
 
             let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
 
-            event_loop.poll(&mut events, next_tick.or(Some(Duration::from_millis(1000)))).unwrap();
+            event_loop
+                .poll(&mut events, next_tick.or(Some(Duration::from_millis(1000))))
+                .unwrap();
 
             // FIXME: Rightnow for migrating from MIO v0.5 to v0.6, I chose to iterate every events in the
             // list and call the old Handler interface.
@@ -380,7 +382,7 @@ impl Scheduler {
                     match timer.tick_to(now) {
                         Some(TimerWaitType::Handle(hdl)) => self.io_handler_queue.push_back(hdl),
                         Some(TimerWaitType::Waiter(waiter_ptr)) => {
-                            let waiter = unsafe { &**waiter_ptr };
+                            let waiter = unsafe { &*waiter_ptr.as_ptr() };
                             if let Some(hdl) = waiter.notify(WaiterState::Timeout) {
                                 self.io_handler_queue.push_back(hdl);
                             }
@@ -398,7 +400,9 @@ impl Scheduler {
             let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
 
             for m in machines.iter() {
-                m.processor_handle.send(ProcMessage::Shutdown(barrier.clone())).unwrap();
+                m.processor_handle
+                    .send(ProcMessage::Shutdown(barrier.clone()))
+                    .unwrap();
             }
 
             *self.idle_processor_mutex.lock().unwrap() = true;
@@ -525,10 +529,10 @@ impl Scheduler {
             let cb = &mut cb as RegisterCallback;
 
             Scheduler::park_with(|_, coro| {
-                let channel = self.event_loop_sender.as_ref().unwrap();
-                let msg = Message::Register(RegisterMessage::new(coro, cb));
-                channel.send(msg).expect("Send msg error");
-            });
+                                     let channel = self.event_loop_sender.as_ref().unwrap();
+                                     let msg = Message::Register(RegisterMessage::new(coro, cb));
+                                     channel.send(msg).expect("Send msg error");
+                                 });
         }
 
         ret
@@ -550,10 +554,10 @@ impl Scheduler {
             let cb = &mut cb as DeregisterCallback;
 
             Scheduler::park_with(|_, coro| {
-                let channel = self.event_loop_sender.as_ref().unwrap();
-                let msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
-                channel.send(msg).expect("Send msg error");
-            });
+                                     let channel = self.event_loop_sender.as_ref().unwrap();
+                                     let msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
+                                     channel.send(msg).expect("Send msg error");
+                                 });
         }
 
         ret
@@ -565,11 +569,13 @@ impl Scheduler {
         trace!("Scheduler: requesting sleep for {}ms", delay);
 
         Scheduler::park_with(|_, coro| {
-            self.timer.lock().timeout_ms(TimerWaitType::Handle(coro), delay);
+                                 self.timer
+                                     .lock()
+                                     .timeout_ms(TimerWaitType::Handle(coro), delay);
 
-            let channel = self.event_loop_sender.as_ref().unwrap();
-            let _ = channel.send(Message::Unfreeze);
-        });
+                                 let channel = self.event_loop_sender.as_ref().unwrap();
+                                 let _ = channel.send(Message::Unfreeze);
+                             });
     }
 
     /// Block the current coroutine until the specific time
@@ -670,13 +676,15 @@ impl Scheduler {
     #[doc(hidden)]
     #[inline]
     pub fn inc_spinning(&self) {
-        self.spinning_processor_count.fetch_add(1, Ordering::Relaxed);
+        self.spinning_processor_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[doc(hidden)]
     #[inline]
     pub fn dec_spinning(&self) {
-        self.spinning_processor_count.fetch_sub(1, Ordering::Relaxed);
+        self.spinning_processor_count
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     #[doc(hidden)]
@@ -725,7 +733,9 @@ impl Scheduler {
     fn io_ready(&mut self, _event_loop: &mut Poll, token: Token, events: Ready) {
         trace!("Handler: got {:?} for {:?}", events, token);
 
-        let ready_states = self.slab.get(token.into()).expect("Token must be registered");
+        let ready_states = self.slab
+            .get(token.into())
+            .expect("Token must be registered");
         ready_states.notify(events, &mut self.io_handler_queue)
     }
 
@@ -779,10 +789,10 @@ mod test {
     fn test_join_basic() {
         Scheduler::new()
             .run(|| {
-                let guard = Scheduler::spawn(|| 1);
+                     let guard = Scheduler::spawn(|| 1);
 
-                assert_eq!(guard.join().unwrap(), 1);
-            })
+                     assert_eq!(guard.join().unwrap(), 1);
+                 })
             .unwrap();
     }
 }

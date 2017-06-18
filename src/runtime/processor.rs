@@ -30,7 +30,7 @@ pub const QUEUE_SIZE: usize = 256;
 
 thread_local!(static PROCESSOR: UnsafeCell<Option<Processor>> = UnsafeCell::new(None));
 
-type BlockWithCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
+// type BlockWithCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
 
 #[derive(Clone)]
 pub struct ProcMessageSender {
@@ -180,7 +180,7 @@ impl fmt::Debug for ProcessorHandle {
     }
 }
 
-type TakeCoroutineCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
+// type TakeCoroutineCallback<'a> = &'a mut FnMut(&mut Processor, Handle);
 
 // The members `queue_head`, `queue_tail` and `queue` in the `Processor` struct
 //  implement an atomic single-producer/multi-consumer ring buffer.
@@ -248,25 +248,25 @@ impl Processor {
         let (tx, rx) = mpsc::channel();
 
         let mut p = Processor(Arc::new(UnsafeCell::new(ProcessorInner {
-            id: processor_id,
+                                                           id: processor_id,
 
-            weak_self: unsafe { mem::zeroed() },
-            scheduler: sched,
+                                                           weak_self: unsafe { mem::zeroed() },
+                                                           scheduler: sched,
 
-            chan_receiver: rx,
-            chan_sender: tx,
+                                                           chan_receiver: rx,
+                                                           chan_sender: tx,
 
-            queue_head: AtomicUsize::new(0),
-            queue_tail: AtomicUsize::new(0),
-            queue: unsafe { mem::zeroed() },
+                                                           queue_head: AtomicUsize::new(0),
+                                                           queue_tail: AtomicUsize::new(0),
+                                                           queue: unsafe { mem::zeroed() },
 
-            current_coro: None,
-            rand_order: RandomProcessorOrder::new(),
-            rng: rand::weak_rng(),
+                                                           current_coro: None,
+                                                           rand_order: RandomProcessorOrder::new(),
+                                                           rng: rand::weak_rng(),
 
-            stack_pool: StackPool::new(Some(max_stack_memory_limit / 2),
-                                       Some(max_stack_memory_limit)),
-        })));
+                                                           stack_pool: StackPool::new(Some(max_stack_memory_limit / 2),
+                                                                                      Some(max_stack_memory_limit)),
+                                                       })));
 
         {
             let weak_self = WeakProcessor(Arc::downgrade(&p.0));
@@ -282,9 +282,9 @@ impl Processor {
                 .stack_size(32 * 1024)
                 .spawn(move || {
                     PROCESSOR.with(|proc_opt| unsafe {
-                        let proc_opt = &mut *proc_opt.get();
-                        *proc_opt = Some(p.clone());
-                    });
+                                       let proc_opt = &mut *proc_opt.get();
+                                       *proc_opt = Some(p.clone());
+                                   });
 
                     barrier.wait();
                     p.schedule();
@@ -309,7 +309,10 @@ impl Processor {
     //   https://github.com/rust-lang/rust/commit/12c5fc5877f708e8e4df05bf834261f5237ac437
     #[inline(never)]
     pub fn current() -> Option<ProcessorHandle> {
-        PROCESSOR.with(|proc_opt| unsafe { (&mut *proc_opt.get()) }).as_mut().map(ProcessorHandle)
+        PROCESSOR
+            .with(|proc_opt| unsafe { (&mut *proc_opt.get()) })
+            .as_mut()
+            .map(ProcessorHandle)
     }
 
     #[inline(never)]
@@ -424,7 +427,8 @@ impl Processor {
 
             let coro = unsafe { *self.queue.get_unchecked(h % QUEUE_SIZE) };
 
-            if self.queue_head.compare_and_swap(h, h.wrapping_add(1), Ordering::Release) == h {
+            if self.queue_head
+                   .compare_and_swap(h, h.wrapping_add(1), Ordering::Release) == h {
                 let hdl = Some(unsafe { Handle::from_raw(coro) });
                 trace!("{:?}: popped {:?} from local queue", self, hdl);
                 return hdl;
@@ -475,7 +479,8 @@ impl Processor {
             }
         }
 
-        if self.queue_head.compare_and_swap(h, h.wrapping_add(n), Ordering::Release) != h {
+        if self.queue_head
+               .compare_and_swap(h, h.wrapping_add(n), Ordering::Release) != h {
             return false;
         }
 
@@ -516,7 +521,8 @@ impl Processor {
                 }
             }
 
-            if self.queue_head.compare_and_swap(h, h.wrapping_add(n), Ordering::Release) == h {
+            if self.queue_head
+                   .compare_and_swap(h, h.wrapping_add(n), Ordering::Release) == h {
                 return n;
             }
         }
@@ -552,7 +558,9 @@ impl Processor {
         self.thread_assert();
         trace!("{:?}: putting {} Coroutines to global", self, batch.len());
 
-        let iter = batch.into_iter().map(|coro| unsafe { Handle::from_raw(*coro) });
+        let iter = batch
+            .into_iter()
+            .map(|coro| unsafe { Handle::from_raw(*coro) });
         self.scheduler().push_global_queue_iter(iter);
     }
 
@@ -607,7 +615,8 @@ impl Processor {
 
             if cnt > 0 {
                 // makes the item available for consumption
-                self.queue_tail.store(t.wrapping_add(cnt), Ordering::Release);
+                self.queue_tail
+                    .store(t.wrapping_add(cnt), Ordering::Release);
             }
 
             cnt + 1
@@ -685,9 +694,9 @@ impl Processor {
             } else {
                 trace!("{:?}: parking", self);
                 scheduler.park_processor(|| {
-                    run_next = self.fetch_foreign_coroutines();
-                    run_next.is_none()
-                });
+                                             run_next = self.fetch_foreign_coroutines();
+                                             run_next.is_none()
+                                         });
                 trace!("{:?}: unparked", self);
             }
         }
@@ -720,7 +729,9 @@ impl Processor {
 
         trace!("{:?}: resuming {:?}", self, coro);
         let data = {
-            debug_assert!(self.current_coro.is_none(), "{:?} is still running!", self.current_coro);
+            debug_assert!(self.current_coro.is_none(),
+                          "{:?} is still running!",
+                          self.current_coro);
 
             self.current_coro = Some(coro);
 
@@ -731,7 +742,9 @@ impl Processor {
             }
         };
 
-        trace!("{:?}: Coroutine yield back with {:?}", self, self.current_coro);
+        trace!("{:?}: Coroutine yield back with {:?}",
+               self,
+               self.current_coro);
 
         let mut hdl = None;
         if let Some(coro) = self.current_coro.take() {
@@ -752,13 +765,13 @@ impl Processor {
                     assert!(data != 0, "Coroutine parked with data == 0");
                     // Take out the data carrier
                     let carrier = unsafe {
-                        (&mut *(data as *mut Option<(usize, usize)>)).take().unwrap()
+                        (&mut *(data as *mut Option<(usize, usize)>))
+                            .take()
+                            .unwrap()
                     };
 
                     // Transmute the first item of the tuple back to the bridge function
-                    let function: fn(usize, &mut Processor, Handle) = unsafe {
-                        mem::transmute(carrier.0)
-                    };
+                    let function: fn(usize, &mut Processor, Handle) = unsafe { mem::transmute(carrier.0) };
 
                     // The function is a global generic function, so it is safe to
                     // call it even if the Coroutine is dropped inside its body.
@@ -946,9 +959,9 @@ mod test {
                     let results = results.clone();
 
                     Scheduler::spawn(move || {
-                        let mut results = results.lock().unwrap();
-                        results.push(i);
-                    });
+                                         let mut results = results.lock().unwrap();
+                                         results.push(i);
+                                     });
                 }
 
                 {
@@ -976,9 +989,7 @@ mod test {
 
                 for _ in 0..300 {
                     let counter = counter.clone();
-                    let f = move || {
-                        counter.fetch_add(1, Ordering::SeqCst);
-                    };
+                    let f = move || { counter.fetch_add(1, Ordering::SeqCst); };
                     Scheduler::spawn_opts(f, opts.clone());
                 }
 

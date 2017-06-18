@@ -44,7 +44,7 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
             let coro = unsafe { &mut *(coro_ptr as *mut Coroutine) };
 
             trace!("{:?}: yielding back to spawn", coro);
-            let ctx = t.context.resume(coro_ptr).context;
+            let ctx = unsafe { t.context.resume(coro_ptr).context };
 
             coro.context = Some(ctx);
 
@@ -59,11 +59,13 @@ extern "C" fn coroutine_entry(t: Transfer) -> ! {
     let mut ctx = coro.take_context();
 
     while coro.state != State::Dropping {
-        ctx = ctx.resume(0).context
+        ctx = unsafe { ctx.resume(0).context };
     }
 
     // Drop the Coroutine including the stack after it is finished
-    ctx.resume_ontop(&mut coro as *mut _ as usize, coroutine_exit);
+    unsafe {
+        ctx.resume_ontop(&mut coro as *mut _ as usize, coroutine_exit);
+    }
 
     unreachable!();
 }
@@ -153,11 +155,11 @@ impl Coroutine {
     }
 
     fn create_coroutine(data: InitData, opts: Options) -> Handle {
-        let context = Context::new(&data.stack, coroutine_entry);
+        let context = unsafe { Context::new(&data.stack, coroutine_entry) };
 
         // Give him the initialization data
         let mut data_opt = Some(data);
-        let t = context.resume(&mut data_opt as *mut _ as usize);
+        let t = unsafe { context.resume(&mut data_opt as *mut _ as usize) };
         debug_assert!(data_opt.is_none());
 
         let coro_ref = unsafe { &mut *(t.data as *mut Coroutine) };
@@ -223,7 +225,7 @@ impl Coroutine {
 
         self.state = state;
 
-        let Transfer { context, data } = context.resume(data);
+        let Transfer { context, data } = unsafe { context.resume(data) };
 
         // We've returned from a yield to the Processor, because it resume()d us!
         // `context` is the Context of the Processor which we store so we can yield back to it.
@@ -298,7 +300,10 @@ impl Drop for Handle {
 
         trace!("{:?}: dropping with state {:?}", self, state);
         if state != State::Finished {
-            ctx = ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind).context;
+            ctx = unsafe {
+                ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind)
+                    .context
+            };
         }
 
         debug_assert!(self.state() == State::Finished,
@@ -307,7 +312,9 @@ impl Drop for Handle {
 
         // Final step, drop the coroutine
         self.state = State::Dropping;
-        ctx.resume(0);
+        unsafe {
+            ctx.resume(0);
+        }
     }
 }
 
@@ -369,13 +376,15 @@ impl HandleList {
                 self.head = Some(hdl);
                 self.tail = Some(unsafe { Shared::new(coro_ptr) });
             }
-            Some(tail) => {
-                let tail_ref = unsafe { &mut **tail };
+            Some(mut tail) => {
                 let coro_ptr = hdl.0 as *mut _;
                 // hdl will be the new tail => let it point to the previous one
                 hdl.prev = Some(tail);
                 // The previous tail should point to the new tail
-                tail_ref.next = Some(hdl);
+                {
+                    let tail_ref = unsafe { &mut *tail.as_mut() };
+                    tail_ref.next = Some(hdl);
+                }
                 // And we need to update our tail pointer of course
                 self.tail = Some(unsafe { Shared::new(coro_ptr) });
             }
@@ -412,8 +421,8 @@ impl HandleList {
         // No need for .take() since self.tail is Copy and is overwritten below anyways
         match self.tail {
             None => None,
-            Some(tail) => {
-                let tail_ref = unsafe { &mut **tail };
+            Some(mut tail) => {
+                let tail_ref = unsafe { &mut *tail.as_mut() };
 
                 // The second last entry is now the new tail
                 self.tail = tail_ref.prev;
@@ -424,7 +433,7 @@ impl HandleList {
                     // Since we are the only element we can get the returned Handle from self.head
                     None => self.head.take(),
                     // ...otherwise get it from the second last entry
-                    Some(prev) => unsafe { &mut **prev }.next.take(),
+                    Some(mut prev) => unsafe { &mut *prev.as_mut() }.next.take(),
                 }
             }
         }
@@ -437,14 +446,17 @@ impl HandleList {
                 self.head = other.head.take();
                 self.tail = other.tail.take();
             }
-            Some(tail) => {
+            Some(mut tail) => {
                 // ...otherwise we need to append `head` from `other` to the `tail` of `self`
                 if let Some(mut o_head) = other.head.take() {
-                    let tail_ref = unsafe { &mut **tail };
+
                     // `o_head` will now follow the previous `tail` => set the `prev` pointer first
                     o_head.prev = Some(tail);
                     // ...and do the same for the `next` pointer
-                    tail_ref.next = Some(o_head);
+                    {
+                        let tail_ref = unsafe { &mut *tail.as_mut() };
+                        tail_ref.next = Some(o_head);
+                    }
                     // `o_tail` will now be the new tail of course
                     self.tail = other.tail.take();
                 }
@@ -660,9 +672,7 @@ mod test {
 
                             let drop_check = DropCheck(shared_usize);
 
-                            Scheduler::park_with(|_, coro| {
-                                *coro_container.lock().unwrap() = Some(coro);
-                            });
+                            Scheduler::park_with(|_, coro| { *coro_container.lock().unwrap() = Some(coro); });
 
                             drop_check.0.store(2, Ordering::SeqCst);
                         })
@@ -672,9 +682,9 @@ mod test {
 
                     let mut coro_container = coro_container.lock().unwrap();
                     assert!(match *coro_container {
-                        Some(..) => true,
-                        None => false,
-                    });
+                                Some(..) => true,
+                                None => false,
+                            });
 
                     *coro_container = None; // drop the Coroutine
 
