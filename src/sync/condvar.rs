@@ -48,14 +48,14 @@ impl Waiter {
             next: None,
 
             shared: Spinlock::new(SharedWaiter {
-                                      handle: None,
-                                      state: WaiterState::Empty,
-                                      timeout: None,
-                                  }),
+                handle: None,
+                state: WaiterState::Empty,
+                timeout: None,
+            }),
         }
     }
 
-    #[must_use]
+    //#[must_use]
     pub fn notify(&self, t: WaiterState) -> Option<Handle> {
         debug_assert!(t != WaiterState::Empty);
 
@@ -102,12 +102,12 @@ impl WaiterList {
         match self.tail {
             None => {
                 // Since head is None the list must be empty => set head and tail to hdl
-                let node = Some(unsafe { Shared::new(waiter) });
+                let node = Some(unsafe { Shared::new_unchecked(waiter) });
                 self.head = node;
                 self.tail = node;
             }
             Some(mut tail) => {
-                let node = Some(unsafe { Shared::new(waiter) });
+                let node = Some(unsafe { Shared::new_unchecked(waiter) });
                 {
                     let tail_ref = unsafe { &mut *tail.as_mut() };
                     self.tail = node;

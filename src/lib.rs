@@ -8,12 +8,7 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(
-    asm,
-    fnbox,
-    optin_builtin_traits,
-    shared,
-)]
+#![feature(asm, fnbox, optin_builtin_traits, shared)]
 
 #[macro_use]
 extern crate log;
@@ -23,6 +18,8 @@ extern crate deque;
 extern crate libc;
 extern crate linked_hash_map;
 extern crate mio;
+extern crate mio_more;
+extern crate mio_uds;
 extern crate rand;
 extern crate slab;
 extern crate time;
@@ -39,7 +36,7 @@ pub mod sync;
 
 pub use options::Options;
 pub use promise::Promise;
-pub use scheduler::{Scheduler, JoinHandle};
+pub use scheduler::{JoinHandle, Scheduler};
 
 mod coroutine;
 mod runtime;
@@ -48,13 +45,14 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 
 /// Spawn a new Coroutine
 #[inline]
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-    where F: FnOnce() -> T + Send + 'static,
-          T: Send + 'static
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
 {
     Scheduler::spawn(f)
 }
@@ -62,8 +60,9 @@ pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 /// Spawn a new Coroutine with options
 #[inline]
 pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
-    where F: FnOnce() -> T + Send + 'static,
-          T: Send + 'static
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
 {
     Scheduler::spawn_opts(f, opts)
 }
@@ -100,7 +99,9 @@ impl Builder {
     // from which configuration methods can be chained.
     #[inline]
     pub fn new() -> Builder {
-        Builder { opts: Options::new() }
+        Builder {
+            opts: Options::new(),
+        }
     }
 
     /// Sets the size of the stack for the new coroutine.
@@ -121,8 +122,9 @@ impl Builder {
     /// Spawn a new coroutine
     #[inline]
     pub fn spawn<F, T>(self, f: F) -> JoinHandle<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
     {
         Scheduler::spawn_opts(f, self.opts)
     }
@@ -170,6 +172,10 @@ mod test {
 
     #[test]
     fn test_sleep_ms() {
-        Scheduler::new().run(|| { sleep_ms(1000); }).unwrap();
+        Scheduler::new()
+            .run(|| {
+                sleep_ms(1000);
+            })
+            .unwrap();
     }
 }

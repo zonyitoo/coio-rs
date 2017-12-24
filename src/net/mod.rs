@@ -14,11 +14,11 @@ pub mod udp;
 #[cfg(unix)]
 pub mod unix;
 
-pub use self::tcp::{TcpListener, TcpStream, Shutdown};
+pub use self::tcp::{Shutdown, TcpListener, TcpStream};
 pub use self::udp::UdpSocket;
 
 #[cfg(unix)]
-pub use self::unix::{UnixListener, UnixStream, UnixSocket};
+pub use self::unix::{UnixListener, UnixStream};
 
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
@@ -142,11 +142,9 @@ impl<'a, E: Evented + Debug + Read + 'a> GenericEvented<E> {
 
             match *self.read_timeout.lock() {
                 None => self.ready_states.wait(ReadyType::Readable),
-                Some(t) => {
-                    if self.ready_states.wait_timeout(ReadyType::Readable, t) {
-                        return Err(make_timeout());
-                    }
-                }
+                Some(t) => if self.ready_states.wait_timeout(ReadyType::Readable, t) {
+                    return Err(make_timeout());
+                },
             }
         }
     }
@@ -190,11 +188,9 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
 
             match *self.write_timeout.lock() {
                 None => self.ready_states.wait(ReadyType::Writable),
-                Some(t) => {
-                    if self.ready_states.wait_timeout(ReadyType::Writable, t) {
-                        return Err(make_timeout());
-                    }
-                }
+                Some(t) => if self.ready_states.wait_timeout(ReadyType::Writable, t) {
+                    return Err(make_timeout());
+                },
             }
         }
     }
@@ -225,11 +221,9 @@ impl<'a, E: Evented + Debug + Write + 'a> GenericEvented<E> {
 
             match *self.write_timeout.lock() {
                 None => self.ready_states.wait(ReadyType::Writable),
-                Some(t) => {
-                    if self.ready_states.wait_timeout(ReadyType::Writable, t) {
-                        return Err(make_timeout());
-                    }
-                }
+                Some(t) => if self.ready_states.wait_timeout(ReadyType::Writable, t) {
+                    return Err(make_timeout());
+                },
             }
         }
     }
@@ -308,7 +302,8 @@ impl Drop for SyncGuard {
 
 // Credit goes to std::net::each_addr
 fn each_addr<A: ToSocketAddrs, F, T>(addr: A, mut f: F) -> io::Result<T>
-    where F: FnMut(&SocketAddr) -> io::Result<T>
+where
+    F: FnMut(&SocketAddr) -> io::Result<T>,
 {
     let mut last_err = None;
 
@@ -320,7 +315,9 @@ fn each_addr<A: ToSocketAddrs, F, T>(addr: A, mut f: F) -> io::Result<T>
     }
 
     Err(last_err.unwrap_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput,
-                       "could not resolve to any addresses")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any addresses",
+        )
     }))
 }

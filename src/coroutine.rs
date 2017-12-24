@@ -306,9 +306,11 @@ impl Drop for Handle {
             };
         }
 
-        debug_assert!(self.state() == State::Finished,
-                      "Expecting Coroutine to be finished, found {:?}",
-                      self.state());
+        debug_assert!(
+            self.state() == State::Finished,
+            "Expecting Coroutine to be finished, found {:?}",
+            self.state()
+        );
 
         // Final step, drop the coroutine
         self.state = State::Dropping;
@@ -351,12 +353,12 @@ impl HandleList {
                 // Since head is None the list must be empty => set head and tail to hdl
                 let coro_ptr = hdl.0 as *mut _;
                 self.head = Some(hdl);
-                self.tail = Some(unsafe { Shared::new(coro_ptr) });
+                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
             }
             Some(ref mut head) => {
                 // Since head is Some the list must be non-empty
                 // Set prev of the current head to the soon-to-be head (hdl)
-                head.prev = Some(unsafe { Shared::new(hdl.0 as *mut _) });
+                head.prev = Some(unsafe { Shared::new_unchecked(hdl.0 as *mut _) });
                 // Set hdl as the new head
                 mem::swap(head, &mut hdl);
                 // head contains the pointer from hdl (and v.v.) => set the .next of the new head
@@ -374,7 +376,7 @@ impl HandleList {
                 // Since head is None the list must be empty => set head and tail to hdl
                 let coro_ptr = hdl.0 as *mut _;
                 self.head = Some(hdl);
-                self.tail = Some(unsafe { Shared::new(coro_ptr) });
+                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
             }
             Some(mut tail) => {
                 let coro_ptr = hdl.0 as *mut _;
@@ -386,7 +388,7 @@ impl HandleList {
                     tail_ref.next = Some(hdl);
                 }
                 // And we need to update our tail pointer of course
-                self.tail = Some(unsafe { Shared::new(coro_ptr) });
+                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
             }
         }
 
@@ -449,7 +451,6 @@ impl HandleList {
             Some(mut tail) => {
                 // ...otherwise we need to append `head` from `other` to the `tail` of `self`
                 if let Some(mut o_head) = other.head.take() {
-
                     // `o_head` will now follow the previous `tail` => set the `prev` pointer first
                     o_head.prev = Some(tail);
                     // ...and do the same for the `next` pointer
@@ -494,7 +495,7 @@ impl HandleList {
         let mut next_head = coro_ref.next.take();
         next_head.as_mut().map(|h| h.prev = None);
 
-        let new_tail = Some(unsafe { Shared::new(p) });
+        let new_tail = Some(unsafe { Shared::new_unchecked(p) });
         mem::swap(&mut next_head, &mut self.head);
 
         self.length -= n;
@@ -567,7 +568,8 @@ impl<'a> IntoIterator for &'a HandleList {
 
 impl Extend<Handle> for HandleList {
     fn extend<T>(&mut self, iter: T)
-        where T: IntoIterator<Item = Handle>
+    where
+        T: IntoIterator<Item = Handle>,
     {
         for hdl in iter {
             self.push_back(hdl);
@@ -672,7 +674,9 @@ mod test {
 
                             let drop_check = DropCheck(shared_usize);
 
-                            Scheduler::park_with(|_, coro| { *coro_container.lock().unwrap() = Some(coro); });
+                            Scheduler::park_with(|_, coro| {
+                                *coro_container.lock().unwrap() = Some(coro);
+                            });
 
                             drop_check.0.store(2, Ordering::SeqCst);
                         })
@@ -682,9 +686,9 @@ mod test {
 
                     let mut coro_container = coro_container.lock().unwrap();
                     assert!(match *coro_container {
-                                Some(..) => true,
-                                None => false,
-                            });
+                        Some(..) => true,
+                        None => false,
+                    });
 
                     *coro_container = None; // drop the Coroutine
 

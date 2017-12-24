@@ -8,14 +8,14 @@
 
 //! UDP
 
-use std::io;
+use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs};
 
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, RawFd};
 
 use mio::Ready;
-use mio::udp::UdpSocket as MioUdpSocket;
+use mio::net::UdpSocket as MioUdpSocket;
 
 use scheduler::ReadyType;
 use super::{each_addr, make_timeout, GenericEvented, SyncGuard};
@@ -27,7 +27,6 @@ macro_rules! create_udp_socket {
 pub type UdpSocket = GenericEvented<MioUdpSocket>;
 
 impl UdpSocket {
-
     /*
     /// Returns a new, unbound, non-blocking, IPv4 UDP socket
     pub fn v4() -> io::Result<UdpSocket> {
@@ -59,12 +58,12 @@ impl UdpSocket {
 
         loop {
             match self.get_inner_mut().recv_from(buf) {
-                Ok(None) => {
-                    trace!("UdpSocket({:?}): recv_from() => WouldBlock", self.token);
-                }
-                Ok(Some(t)) => {
+                Ok(t) => {
                     trace!("UdpSocket({:?}): recv_from() => Ok(..)", self.token);
                     return Ok(t);
+                }
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                    trace!("UdpSocket({:?}): recv_from() => WouldBlock", self.token);
                 }
                 Err(err) => {
                     trace!("UdpSocket({:?}): recv_from() => Err(..)", self.token);
@@ -91,12 +90,12 @@ impl UdpSocket {
 
         loop {
             match self.get_inner_mut().send_to(buf, target) {
-                Ok(None) => {
-                    trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
-                }
-                Ok(Some(len)) => {
+                Ok(len) => {
                     trace!("UdpSocket({:?}): send_to() => Ok({})", self.token, len);
                     return Ok(len);
+                }
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                    trace!("UdpSocket({:?}): send_to() => WouldBlock", self.token);
                 }
                 Err(err) => {
                     trace!("UdpSocket({:?}): send_to() => Err(..)", self.token);

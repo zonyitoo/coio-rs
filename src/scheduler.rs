@@ -20,16 +20,16 @@ use std::thread;
 use std::time::Duration;
 use std::usize;
 
-use mio::{Evented, Ready, PollOpt, Token};
-use mio::{self, Poll, Events};
-use mio::channel::Sender;
+use mio::{Evented, PollOpt, Ready, Token};
+use mio::{Events, Poll};
+use mio_more::channel::Sender;
 use slab::Slab;
 
 use coroutine::{Coroutine, Handle, HandleList};
 use join_handle::{self, JoinHandleReceiver};
 use options::Options;
-use runtime::processor::{self, Machine, Processor, ProcMessage};
-use runtime::timer::{Timer, Timeout};
+use runtime::processor::{self, Machine, ProcMessage, Processor};
+use runtime::timer::{Timeout, Timer};
 use sync::condvar::{Condvar as CoroCondvar, Waiter, WaiterState};
 use sync::spinlock::Spinlock;
 
@@ -134,9 +134,13 @@ pub struct ReadyStates {
 impl ReadyStates {
     #[inline]
     fn new() -> ReadyStates {
-        let stats = ReadyStatesInner { condvars: [CoroCondvar::new(), CoroCondvar::new()] };
+        let stats = ReadyStatesInner {
+            condvars: [CoroCondvar::new(), CoroCondvar::new()],
+        };
 
-        ReadyStates { inner: Arc::new(stats) }
+        ReadyStates {
+            inner: Arc::new(stats),
+        }
     }
 
     pub fn wait(&self, ready_type: ReadyType) {
@@ -165,7 +169,6 @@ impl ReadyStates {
         //     self.inner.condvars[ReadyType::Writable as usize].notify_all(handles);
         // }
         //
-
     }
 }
 
@@ -250,8 +253,9 @@ impl Scheduler {
 
     /// Run the scheduler
     pub fn run<F, T>(&mut self, f: F) -> thread::Result<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
     {
         trace!("setting custom panic hook");
         self.is_running = true;
@@ -273,8 +277,10 @@ impl Scheduler {
         }));
 
         if self.expected_worker_count > 1 {
-            warn!("It is unsafe to run Scheduler in multithread mode, see \
-                   https://github.com/zonyitoo/coio-rs/issues/56 for details");
+            warn!(
+                "It is unsafe to run Scheduler in multithread mode, see \
+                 https://github.com/zonyitoo/coio-rs/issues/56 for details"
+            );
         }
 
         // Timer has to be setup before any kind of operations on it
@@ -284,11 +290,16 @@ impl Scheduler {
 
         let mut event_loop = Poll::new().unwrap();
 
-        let (tx, rx) = mio::channel::channel();
+        let (tx, rx) = ::mio_more::channel::channel();
         // FIXME: I use Token(0) expr right here because const_fn is still unstable
         // It should be replaced by a const definition
         event_loop
-            .register(&rx, Token(0), Ready::all(), PollOpt::edge())
+            .register(
+                &rx,
+                Token(0),
+                Ready::readable() | Ready::writable(),
+                PollOpt::edge(),
+            )
             .unwrap();
         // Occupy the 0 index in slab
         self.slab.insert(ReadyStates::new()).unwrap();
@@ -316,7 +327,7 @@ impl Scheduler {
             self.push_global_queue(main_coro);
         };
 
-        let mut machines = unsafe { &mut *self.machines.get() };
+        let machines = unsafe { &mut *self.machines.get() };
         machines.reserve(self.expected_worker_count);
 
         trace!("spawning Machines");
@@ -340,13 +351,15 @@ impl Scheduler {
 
         while self.is_running {
             let next_tick = self.timer.lock().next_tick_in_ms();
-            let next_tick = next_tick.map(|ms| if ms > usize::max_value() as u64 {
-                                              usize::max_value()
-                                          } else if ms < usize::min_value() as u64 {
-                                              usize::min_value()
-                                          } else {
-                                              ms as usize
-                                          });
+            let next_tick = next_tick.map(|ms| {
+                if ms > usize::max_value() as u64 {
+                    usize::max_value()
+                } else if ms < usize::min_value() as u64 {
+                    usize::min_value()
+                } else {
+                    ms as usize
+                }
+            });
             trace!("run_once({:?})", next_tick);
 
             let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
@@ -368,7 +381,7 @@ impl Scheduler {
                         }
                     }
                     token => {
-                        self.io_ready(&mut event_loop, token, event.kind());
+                        self.io_ready(&mut event_loop, token, event.readiness());
                     }
                 }
             }
@@ -441,8 +454,9 @@ impl Scheduler {
 
     /// Spawn a new coroutine with default options
     pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
     {
         let opt = Scheduler::instance().unwrap().default_spawn_options.clone();
         Scheduler::spawn_opts(f, opt)
@@ -450,8 +464,9 @@ impl Scheduler {
 
     /// Spawn a new coroutine with options
     pub fn spawn_opts<F, T>(f: F, opts: Options) -> JoinHandle<T>
-        where F: FnOnce() -> T + Send + 'static,
-              T: Send + 'static
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
     {
         let (tx, rx) = join_handle::handle_pair();
         let wrapper = move || {
@@ -478,7 +493,8 @@ impl Scheduler {
 
     /// Block the current coroutine
     pub fn park_with<'scope, F>(f: F)
-        where F: FnOnce(&mut Processor, Handle) + 'scope
+    where
+        F: FnOnce(&mut Processor, Handle) + 'scope,
     {
         Processor::current().map(|x| x.park_with(f)).unwrap()
     }
@@ -502,11 +518,14 @@ impl Scheduler {
     /// Block the current coroutine and wait for I/O event
     #[doc(hidden)]
     pub fn register<E>(&self, fd: &E, interest: Ready) -> io::Result<(Token, ReadyStates)>
-        where E: Evented + Debug
+    where
+        E: Evented + Debug,
     {
-        trace!("Scheduler: requesting register of {:?} for {:?}",
-               fd,
-               interest);
+        trace!(
+            "Scheduler: requesting register of {:?} for {:?}",
+            fd,
+            interest
+        );
 
         let mut ret = Err(io::Error::from_raw_os_error(0));
 
@@ -529,10 +548,10 @@ impl Scheduler {
             let cb = &mut cb as RegisterCallback;
 
             Scheduler::park_with(|_, coro| {
-                                     let channel = self.event_loop_sender.as_ref().unwrap();
-                                     let msg = Message::Register(RegisterMessage::new(coro, cb));
-                                     channel.send(msg).expect("Send msg error");
-                                 });
+                let channel = self.event_loop_sender.as_ref().unwrap();
+                let msg = Message::Register(RegisterMessage::new(coro, cb));
+                channel.send(msg).expect("Send msg error");
+            });
         }
 
         ret
@@ -540,7 +559,8 @@ impl Scheduler {
 
     #[doc(hidden)]
     pub fn deregister<E>(&self, fd: &E, token: Token) -> io::Result<()>
-        where E: Evented + Debug
+    where
+        E: Evented + Debug,
     {
         trace!("Scheduler: requesting deregister of {:?}", fd);
 
@@ -554,10 +574,10 @@ impl Scheduler {
             let cb = &mut cb as DeregisterCallback;
 
             Scheduler::park_with(|_, coro| {
-                                     let channel = self.event_loop_sender.as_ref().unwrap();
-                                     let msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
-                                     channel.send(msg).expect("Send msg error");
-                                 });
+                let channel = self.event_loop_sender.as_ref().unwrap();
+                let msg = Message::Deregister(DeregisterMessage::new(coro, cb, token));
+                channel.send(msg).expect("Send msg error");
+            });
         }
 
         ret
@@ -569,13 +589,13 @@ impl Scheduler {
         trace!("Scheduler: requesting sleep for {}ms", delay);
 
         Scheduler::park_with(|_, coro| {
-                                 self.timer
-                                     .lock()
-                                     .timeout_ms(TimerWaitType::Handle(coro), delay);
+            self.timer
+                .lock()
+                .timeout_ms(TimerWaitType::Handle(coro), delay);
 
-                                 let channel = self.event_loop_sender.as_ref().unwrap();
-                                 let _ = channel.send(Message::Unfreeze);
-                             });
+            let channel = self.event_loop_sender.as_ref().unwrap();
+            let _ = channel.send(Message::Unfreeze);
+        });
     }
 
     /// Block the current coroutine until the specific time
@@ -591,7 +611,10 @@ impl Scheduler {
 
         let ret = {
             let mut timer = self.timer.lock();
-            timer.timeout_ms(TimerWaitType::Waiter(unsafe { Shared::new(waiter) }), delay)
+            timer.timeout_ms(
+                TimerWaitType::Waiter(unsafe { Shared::new_unchecked(waiter) }),
+                delay,
+            )
         };
 
         let channel = self.event_loop_sender.as_ref().unwrap();
@@ -633,7 +656,8 @@ impl Scheduler {
 
     #[doc(hidden)]
     pub fn push_global_queue_iter<T>(&self, iter: T)
-        where T: IntoIterator<Item = Handle>
+    where
+        T: IntoIterator<Item = Handle>,
     {
         let size = {
             let mut queue = self.get_global_queue();
@@ -789,10 +813,10 @@ mod test {
     fn test_join_basic() {
         Scheduler::new()
             .run(|| {
-                     let guard = Scheduler::spawn(|| 1);
+                let guard = Scheduler::spawn(|| 1);
 
-                     assert_eq!(guard.join().unwrap(), 1);
-                 })
+                assert_eq!(guard.join().unwrap(), 1);
+            })
             .unwrap();
     }
 }
