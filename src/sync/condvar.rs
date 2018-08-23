@@ -1,6 +1,6 @@
 use std::fmt;
 use std::mem;
-use std::ptr::Shared;
+use std::ptr::NonNull;
 use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cmp;
@@ -34,8 +34,8 @@ struct SharedWaiter {
 //   to this struct has been removed before you drop the struct.
 pub struct Waiter {
     // The following fields are owned by Condvar and only accessed when it's lock is acquired:
-    prev: Option<Shared<Waiter>>,
-    next: Option<Shared<Waiter>>,
+    prev: Option<NonNull<Waiter>>,
+    next: Option<NonNull<Waiter>>,
 
     // The following fields are shared between  Condvar, Scheduler and Waiter:
     shared: Spinlock<SharedWaiter>,
@@ -93,8 +93,8 @@ impl Waiter {
 }
 
 struct WaiterList {
-    head: Option<Shared<Waiter>>,
-    tail: Option<Shared<Waiter>>,
+    head: Option<NonNull<Waiter>>,
+    tail: Option<NonNull<Waiter>>,
 }
 
 impl WaiterList {
@@ -102,12 +102,12 @@ impl WaiterList {
         match self.tail {
             None => {
                 // Since head is None the list must be empty => set head and tail to hdl
-                let node = Some(unsafe { Shared::new_unchecked(waiter) });
+                let node = Some(unsafe { NonNull::new_unchecked(waiter) });
                 self.head = node;
                 self.tail = node;
             }
             Some(mut tail) => {
-                let node = Some(unsafe { Shared::new_unchecked(waiter) });
+                let node = Some(unsafe { NonNull::new_unchecked(waiter) });
                 {
                     let tail_ref = unsafe { &mut *tail.as_mut() };
                     self.tail = node;
@@ -118,7 +118,7 @@ impl WaiterList {
         }
     }
 
-    fn pop_front(&mut self) -> Option<Shared<Waiter>> {
+    fn pop_front(&mut self) -> Option<NonNull<Waiter>> {
         match self.head.take() {
             None => None,
             Some(mut head) => {
