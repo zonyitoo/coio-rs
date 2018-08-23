@@ -248,7 +248,7 @@ impl fmt::Debug for CoroMonoBarrier {
 
         if lock == CORO_EMPTY {
             write!(f, "CoroMonoBarrier(Empty)")
-        } else if lock == CORO_EMPTY {
+        } else if lock == CORO_READY {
             write!(f, "CoroMonoBarrier(Ready)")
         } else {
             // It is unsafe to access a Coroutine for a debug description if we do not own it.
