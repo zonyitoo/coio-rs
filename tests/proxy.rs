@@ -143,8 +143,7 @@ fn proxy_shared_tcp_stream() {
             let local = Scheduler::spawn(|| {
                 println!("LOCAL started");
 
-                // const TOTAL_BYTES: usize = 100 * 1024 * 1024; // 100M
-                const TOTAL_BYTES: usize = 1 * 1024 * 1024;
+                const TOTAL_BYTES: usize = 100 * 1024 * 1024; // 100M
                 const DATA: [u8; 4096] = [0u8; 4096];
 
                 let stream = TcpStream::connect(LOCAL_ADDR).unwrap();

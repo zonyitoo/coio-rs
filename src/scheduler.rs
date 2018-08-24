@@ -455,6 +455,7 @@ impl Scheduler {
         trace!("restoring default panic hook");
         panic::take_hook();
 
+        trace!("scheduler exited");
         result.unwrap()
     }
 
