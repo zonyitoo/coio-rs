@@ -13,20 +13,20 @@ use std::sync::Arc;
 use coio::{JoinHandle, Scheduler};
 
 fn invoke_every_ms<F>(ms: u64, f: F) -> JoinHandle<()>
-    where F: Fn() + Sync + Send + 'static
+where
+    F: Fn() + Sync + Send + 'static,
 {
     let f = Arc::new(f);
-    coio::spawn(move || {
-        loop {
-            coio::sleep_ms(ms);
-            let f = f.clone();
-            coio::spawn(move || (*f)());
-        }
+    coio::spawn(move || loop {
+        coio::sleep_ms(ms);
+        let f = f.clone();
+        coio::spawn(move || (*f)());
     })
 }
 
 fn invoke_after_ms<F>(ms: u64, f: F) -> JoinHandle<()>
-    where F: FnOnce() + Send + 'static
+where
+    F: FnOnce() + Send + 'static,
 {
     coio::spawn(move || {
         coio::sleep_ms(ms);
@@ -53,6 +53,5 @@ fn main() {
             for hdl in hdls {
                 hdl.join().unwrap();
             }
-        })
-        .unwrap();
+        }).unwrap();
 }

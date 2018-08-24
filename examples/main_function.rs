@@ -8,8 +8,8 @@
 
 extern crate coio;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use coio::Scheduler;
 
@@ -33,6 +33,8 @@ fn main() {
             coio::sleep_ms(10_000);
             unreachable!("Not going to run this line");
         });
+
+        Scheduler::sched();
 
         // Exit right now, which will cause the coroutine to be destroyed.
         panic!("Exit right now!!");

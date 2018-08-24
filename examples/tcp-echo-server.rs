@@ -14,29 +14,31 @@ extern crate mio;
 
 extern crate coio;
 
-use clap::{Arg, App};
+use clap::{App, Arg};
 
-use coio::Scheduler;
 use coio::net::tcp::TcpListener;
+use coio::Scheduler;
 
 fn main() {
     env_logger::init().unwrap();
 
     let matches = App::new("tcp-echo")
-                      .version(env!("CARGO_PKG_VERSION"))
-                      .author("Y. T. Chung <zonyitoo@gmail.com>")
-                      .arg(Arg::with_name("BIND")
-                               .short("b")
-                               .long("bind")
-                               .takes_value(true)
-                               .required(true)
-                               .help("Listening on this address"))
-                      .arg(Arg::with_name("THREADS")
-                               .short("t")
-                               .long("threads")
-                               .takes_value(true)
-                               .help("Number of threads"))
-                      .get_matches();
+        .version(env!("CARGO_PKG_VERSION"))
+        .author("Y. T. Chung <zonyitoo@gmail.com>")
+        .arg(
+            Arg::with_name("BIND")
+                .short("b")
+                .long("bind")
+                .takes_value(true)
+                .required(true)
+                .help("Listening on this address"),
+        ).arg(
+            Arg::with_name("THREADS")
+                .short("t")
+                .long("threads")
+                .takes_value(true)
+                .help("Number of threads"),
+        ).get_matches();
 
     let bind_addr = matches.value_of("BIND").unwrap().to_owned();
 
@@ -76,6 +78,5 @@ fn main() {
                     info!("{:?} closed", addr);
                 });
             }
-        })
-        .unwrap();
+        }).unwrap();
 }

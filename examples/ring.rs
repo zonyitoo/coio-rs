@@ -10,8 +10,8 @@ extern crate coio;
 
 use std::time::Instant;
 
-use coio::{spawn, Scheduler};
 use coio::sync::mpsc::{channel, Sender};
+use coio::{spawn, Scheduler};
 
 fn create_node(next: Sender<usize>) -> Sender<usize> {
     let (send, recv) = channel::<usize>();

@@ -18,6 +18,5 @@ fn main() {
             });
 
             assert!(handle.join().is_err());
-        })
-        .unwrap();
+        }).unwrap();
 }

@@ -20,6 +20,5 @@ fn main() {
                 println!("Heil Hydra");
                 Scheduler::sched();
             }
-        })
-        .unwrap();
+        }).unwrap();
 }
