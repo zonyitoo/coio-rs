@@ -14,8 +14,8 @@ use std::io::{self, Write};
 use std::mem;
 use std::panic;
 use std::ptr::NonNull;
-use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 use std::usize;
@@ -46,7 +46,6 @@ impl<T> JoinHandle<T> {
         self.result.pop()
     }
 }
-
 
 type RegisterCallback<'a> = &'a mut FnMut(&mut Poll, Token, ReadyStates) -> bool;
 type DeregisterCallback<'a> = &'a mut FnMut(&mut Poll);
@@ -138,9 +137,7 @@ impl ReadyStates {
             condvars: [CoroCondvar::new(), CoroCondvar::new()],
         };
 
-        ReadyStates {
-            inner: Arc::new(stats),
-        }
+        ReadyStates { inner: Arc::new(stats) }
     }
 
     pub fn wait(&self, ready_type: ReadyType) {
@@ -185,7 +182,7 @@ pub struct Scheduler {
 
     // Mio event loop handler
     event_loop_sender: Option<Sender<Message>>,
-    slab: Slab<ReadyStates, usize>,
+    slab: Slab<ReadyStates>,
     timer: Spinlock<Timer<TimerWaitType>>,
 
     // NOTE:
@@ -294,15 +291,10 @@ impl Scheduler {
         // FIXME: I use Token(0) expr right here because const_fn is still unstable
         // It should be replaced by a const definition
         event_loop
-            .register(
-                &rx,
-                Token(0),
-                Ready::readable() | Ready::writable(),
-                PollOpt::edge(),
-            )
+            .register(&rx, Token(0), Ready::readable() | Ready::writable(), PollOpt::edge())
             .unwrap();
         // Occupy the 0 index in slab
-        self.slab.insert(ReadyStates::new()).unwrap();
+        self.slab.insert(ReadyStates::new());
 
         self.event_loop_sender = Some(tx.clone());
 
@@ -413,9 +405,7 @@ impl Scheduler {
             let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
 
             for m in machines.iter() {
-                m.processor_handle
-                    .send(ProcMessage::Shutdown(barrier.clone()))
-                    .unwrap();
+                m.processor_handle.send(ProcMessage::Shutdown(barrier.clone())).unwrap();
             }
 
             *self.idle_processor_mutex.lock().unwrap() = true;
@@ -521,11 +511,7 @@ impl Scheduler {
     where
         E: Evented + Debug,
     {
-        trace!(
-            "Scheduler: requesting register of {:?} for {:?}",
-            fd,
-            interest
-        );
+        trace!("Scheduler: requesting register of {:?} for {:?}", fd, interest);
 
         let mut ret = Err(io::Error::from_raw_os_error(0));
 
@@ -589,9 +575,7 @@ impl Scheduler {
         trace!("Scheduler: requesting sleep for {}ms", delay);
 
         Scheduler::park_with(|_, coro| {
-            self.timer
-                .lock()
-                .timeout_ms(TimerWaitType::Handle(coro), delay);
+            self.timer.lock().timeout_ms(TimerWaitType::Handle(coro), delay);
 
             let channel = self.event_loop_sender.as_ref().unwrap();
             let _ = channel.send(Message::Unfreeze);
@@ -611,10 +595,7 @@ impl Scheduler {
 
         let ret = {
             let mut timer = self.timer.lock();
-            timer.timeout_ms(
-                TimerWaitType::Waiter(unsafe { NonNull::new_unchecked(waiter) }),
-                delay,
-            )
+            timer.timeout_ms(TimerWaitType::Waiter(unsafe { NonNull::new_unchecked(waiter) }), delay)
         };
 
         let channel = self.event_loop_sender.as_ref().unwrap();
@@ -700,15 +681,13 @@ impl Scheduler {
     #[doc(hidden)]
     #[inline]
     pub fn inc_spinning(&self) {
-        self.spinning_processor_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.spinning_processor_count.fetch_add(1, Ordering::Relaxed);
     }
 
     #[doc(hidden)]
     #[inline]
     pub fn dec_spinning(&self) {
-        self.spinning_processor_count
-            .fetch_sub(1, Ordering::Relaxed);
+        self.spinning_processor_count.fetch_sub(1, Ordering::Relaxed);
     }
 
     #[doc(hidden)]
@@ -757,9 +736,7 @@ impl Scheduler {
     fn io_ready(&mut self, _event_loop: &mut Poll, token: Token, events: Ready) {
         trace!("Handler: got {:?} for {:?}", events, token);
 
-        let ready_states = self.slab
-            .get(token.into())
-            .expect("Token must be registered");
+        let ready_states = self.slab.get(token.into()).expect("Token must be registered");
         ready_states.notify(events, &mut self.io_handler_queue)
     }
 
@@ -769,17 +746,12 @@ impl Scheduler {
             Message::Register(RegisterMessage { cb, coro }) => {
                 trace!("Handler: registering for {:?}", coro);
 
-                if self.slab.available() == 0 {
-                    // doubles the size of the slab each time
-                    let grow = self.slab.len();
-                    self.slab.reserve_exact(grow);
-                }
-
-                if let Some(entry) = self.slab.vacant_entry() {
-                    let token = entry.index().into();
+                {
+                    let entry = self.slab.vacant_entry();
+                    let token = entry.key();
                     let ready_states = ReadyStates::new();
 
-                    if (cb)(event_loop, token, ready_states.clone()) {
+                    if (cb)(event_loop, ::mio::Token(token), ready_states.clone()) {
                         entry.insert(ready_states);
                     }
                 }
@@ -816,7 +788,6 @@ mod test {
                 let guard = Scheduler::spawn(|| 1);
 
                 assert_eq!(guard.join().unwrap(), 1);
-            })
-            .unwrap();
+            }).unwrap();
     }
 }

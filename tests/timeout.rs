@@ -4,13 +4,13 @@ extern crate env_logger;
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use coio::Scheduler;
 use coio::net::{TcpListener, TcpStream};
 use coio::sleep;
+use coio::Scheduler;
 
 #[test]
 fn test_tcp_echo() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     Scheduler::new()
         .run(move || {
@@ -42,9 +42,7 @@ fn test_tcp_echo() {
                 println!("SEND: Started");
 
                 let mut stream = TcpStream::connect("127.0.0.1:6789").unwrap();
-                stream.write_all(b"abcdefg")
-                    .and_then(|_| stream.flush())
-                    .unwrap();
+                stream.write_all(b"abcdefg").and_then(|_| stream.flush()).unwrap();
 
                 println!("SEND: Written");
 
@@ -59,6 +57,5 @@ fn test_tcp_echo() {
 
             listen_fut.join().unwrap();
             sender_fut.join().unwrap();
-        })
-        .unwrap();
+        }).unwrap();
 }

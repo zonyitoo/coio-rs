@@ -12,7 +12,7 @@ extern crate env_logger;
 use coio::Scheduler;
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     Scheduler::new()
         .run(|| {

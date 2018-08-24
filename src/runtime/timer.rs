@@ -1,5 +1,5 @@
-use std::usize;
 use std::cmp::max;
+use std::usize;
 use time::precise_time_ns;
 
 const EMPTY: usize = usize::MAX;
@@ -41,7 +41,7 @@ pub struct Timeout {
     tick: u64,
 }
 
-type Slab<T> = ::slab::Slab<T, Token>;
+type Slab<T> = ::slab::Slab<T>;
 
 impl<T> Timer<T> {
     pub fn new(tick_ms: u64, slots: usize, capacity: usize) -> Timer<T> {
@@ -137,16 +137,8 @@ impl<T> Timer<T> {
         let slot = (tick & self.mask) as usize;
         let curr = self.wheel[slot];
 
-        if !self.entries.has_available() {
-            let grow_by = self.entries.len() >> 1;
-            self.entries.reserve_exact(grow_by);
-        }
-
         // Insert the new entry
-        let token = match self.entries.insert(Entry::new(token, tick, curr)) {
-            Ok(token) => token,
-            Err(..) => panic!("slab should not be full"),
-        };
+        let token = self.entries.insert(Entry::new(token, tick, curr));
 
         if curr != EMPTY {
             // If there was a previous entry, set its prev pointer to the new
@@ -167,9 +159,11 @@ impl<T> Timer<T> {
     }
 
     fn unlink(&mut self, links: &EntryLinks, token: Token) {
-        trace!("unlinking timeout; slot={}; token={:?}",
-               self.slot_for(links.tick),
-               token);
+        trace!(
+            "unlinking timeout; slot={}; token={:?}",
+            self.slot_for(links.tick),
+            token
+        );
 
         if links.prev == EMPTY {
             let slot = self.slot_for(links.tick);
@@ -216,9 +210,11 @@ impl<T> Timer<T> {
                     self.unlink(&links, curr);
 
                     // Remove and return the token
-                    return self.entries
-                        .remove(curr)
-                        .map(|e| e.token);
+                    return if self.entries.contains(curr) {
+                        Some(self.entries.remove(curr).token)
+                    } else {
+                        None
+                    };
                 } else {
                     self.next = links.next;
                 }

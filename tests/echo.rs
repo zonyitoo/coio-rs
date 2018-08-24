@@ -11,12 +11,12 @@ extern crate env_logger;
 
 use std::io::{Read, Write};
 
-use coio::Scheduler;
 use coio::net::{TcpListener, TcpStream, UdpSocket};
+use coio::Scheduler;
 
 #[test]
 fn test_tcp_echo() {
-    let _ = env_logger::init();
+    let _ = env_logger::try_init();
 
     Scheduler::new()
         .run(move || {
@@ -33,19 +33,13 @@ fn test_tcp_echo() {
                         break;
                     }
 
-                    stream
-                        .write_all(&buf[..len])
-                        .and_then(|_| stream.flush())
-                        .unwrap();
+                    stream.write_all(&buf[..len]).and_then(|_| stream.flush()).unwrap();
                 }
             });
 
             let sender_fut = Scheduler::spawn(move || {
                 let mut stream = TcpStream::connect("127.0.0.1:6789").unwrap();
-                stream
-                    .write_all(b"abcdefg")
-                    .and_then(|_| stream.flush())
-                    .unwrap();
+                stream.write_all(b"abcdefg").and_then(|_| stream.flush()).unwrap();
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
@@ -54,13 +48,12 @@ fn test_tcp_echo() {
 
             listen_fut.join().unwrap();
             sender_fut.join().unwrap();
-        })
-        .unwrap();
+        }).unwrap();
 }
 
 #[test]
 fn test_udp_echo() {
-    let _ = env_logger::init();
+    let _ = env_logger::try_init();
 
     Scheduler::new()
         .run(move || {
@@ -87,14 +80,13 @@ fn test_udp_echo() {
 
             listen_fut.join().unwrap();
             sender_fut.join().unwrap();
-        })
-        .unwrap();
+        }).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_echo() {
-    let _ = env_logger::init();
+    let _ = env_logger::try_init();
 
     use coio::net::{UnixListener, UnixStream};
     use std::fs;
@@ -112,18 +104,12 @@ fn test_unix_socket_echo() {
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
-                stream
-                    .write_all(&buf[..len])
-                    .and_then(|_| stream.flush())
-                    .unwrap();
+                stream.write_all(&buf[..len]).and_then(|_| stream.flush()).unwrap();
             });
 
             let sender_fut = Scheduler::spawn(move || {
                 let mut stream = UnixStream::connect(&FILE_PATH_STR).unwrap();
-                stream
-                    .write_all(b"abcdefg")
-                    .and_then(|_| stream.flush())
-                    .unwrap();
+                stream.write_all(b"abcdefg").and_then(|_| stream.flush()).unwrap();
 
                 let mut buf = [0u8; 1024];
                 let len = stream.read(&mut buf).unwrap();
@@ -133,6 +119,5 @@ fn test_unix_socket_echo() {
 
             listen_fut.join().unwrap();
             sender_fut.join().unwrap();
-        })
-        .unwrap();
+        }).unwrap();
 }

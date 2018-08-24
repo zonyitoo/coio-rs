@@ -22,7 +22,7 @@ use coio::net::udp::UdpSocket;
 use coio::Scheduler;
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     let matches = App::new("udp-echo")
         .version(env!("CARGO_PKG_VERSION"))

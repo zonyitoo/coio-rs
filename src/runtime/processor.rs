@@ -14,14 +14,15 @@ use std::fmt;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
-use std::sync::{Arc, Barrier, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SendError};
+use std::sync::mpsc::{self, Receiver, SendError, Sender};
+use std::sync::{Arc, Barrier, Weak};
 use std::thread::{self, Builder};
 
-use rand::{self, Rng};
+use rand::rngs::SmallRng;
+use rand::{FromEntropy, Rng};
 
-use coroutine::{Coroutine, State, Handle};
+use coroutine::{Coroutine, Handle, State};
 use options::Options;
 use runtime::stack_pool::StackPool;
 use scheduler::Scheduler;
@@ -117,7 +118,8 @@ impl ProcessorHandle {
     ///       - https://github.com/zonyitoo/coio-rs/issues/44
     ///       - https://github.com/zonyitoo/coio-rs/issues/45
     pub fn park_with<'scope, F>(self, f: F)
-        where F: FnOnce(&mut Processor, Handle) + 'scope
+    where
+        F: FnOnce(&mut Processor, Handle) + 'scope,
     {
         let processor = self.0;
 
@@ -136,7 +138,8 @@ impl ProcessorHandle {
 
         // This function will be called on the Processor's Context as a bridge
         fn carrier_fn<F>(data: usize, p: &mut Processor, coro: Handle)
-            where F: FnOnce(&mut Processor, Handle)
+        where
+            F: FnOnce(&mut Processor, Handle),
         {
             // Take out the callback function object from the Coroutine's stack
             let f = unsafe { (&mut *(data as *mut Option<F>)).take().unwrap() };
@@ -233,40 +236,40 @@ pub struct ProcessorInner {
     // NOTE: current_coro is ONLY to be used by resume() and park_with().
     current_coro: Option<Handle>,
     rand_order: RandomProcessorOrder,
-    rng: rand::XorShiftRng,
+    rng: SmallRng,
 
     stack_pool: StackPool,
 }
 
 impl Processor {
     /// Spawns a new thread and runs a new Processor on it.
-    pub fn spawn(sched: *mut Scheduler,
-                 processor_id: usize,
-                 barrier: Arc<Barrier>,
-                 max_stack_memory_limit: usize)
-                 -> Machine {
+    pub fn spawn(
+        sched: *mut Scheduler,
+        processor_id: usize,
+        barrier: Arc<Barrier>,
+        max_stack_memory_limit: usize,
+    ) -> Machine {
         let (tx, rx) = mpsc::channel();
 
         let mut p = Processor(Arc::new(UnsafeCell::new(ProcessorInner {
-                                                           id: processor_id,
+            id: processor_id,
 
-                                                           weak_self: unsafe { mem::zeroed() },
-                                                           scheduler: sched,
+            weak_self: unsafe { mem::zeroed() },
+            scheduler: sched,
 
-                                                           chan_receiver: rx,
-                                                           chan_sender: tx,
+            chan_receiver: rx,
+            chan_sender: tx,
 
-                                                           queue_head: AtomicUsize::new(0),
-                                                           queue_tail: AtomicUsize::new(0),
-                                                           queue: unsafe { mem::zeroed() },
+            queue_head: AtomicUsize::new(0),
+            queue_tail: AtomicUsize::new(0),
+            queue: unsafe { mem::zeroed() },
 
-                                                           current_coro: None,
-                                                           rand_order: RandomProcessorOrder::new(),
-                                                           rng: rand::weak_rng(),
+            current_coro: None,
+            rand_order: RandomProcessorOrder::new(),
+            rng: SmallRng::from_entropy(),
 
-                                                           stack_pool: StackPool::new(Some(max_stack_memory_limit / 2),
-                                                                                      Some(max_stack_memory_limit)),
-                                                       })));
+            stack_pool: StackPool::new(Some(max_stack_memory_limit / 2), Some(max_stack_memory_limit)),
+        })));
 
         {
             let weak_self = WeakProcessor(Arc::downgrade(&p.0));
@@ -282,14 +285,13 @@ impl Processor {
                 .stack_size(32 * 1024)
                 .spawn(move || {
                     PROCESSOR.with(|proc_opt| unsafe {
-                                       let proc_opt = &mut *proc_opt.get();
-                                       *proc_opt = Some(p.clone());
-                                   });
+                        let proc_opt = &mut *proc_opt.get();
+                        *proc_opt = Some(p.clone());
+                    });
 
                     barrier.wait();
                     p.schedule();
-                })
-                .unwrap()
+                }).unwrap()
         };
 
         Machine {
@@ -427,8 +429,11 @@ impl Processor {
 
             let coro = unsafe { *self.queue.get_unchecked(h % QUEUE_SIZE) };
 
-            if self.queue_head
-                   .compare_and_swap(h, h.wrapping_add(1), Ordering::Release) == h {
+            if self
+                .queue_head
+                .compare_and_swap(h, h.wrapping_add(1), Ordering::Release)
+                == h
+            {
                 let hdl = Some(unsafe { Handle::from_raw(coro) });
                 trace!("{:?}: popped {:?} from local queue", self, hdl);
                 return hdl;
@@ -479,8 +484,11 @@ impl Processor {
             }
         }
 
-        if self.queue_head
-               .compare_and_swap(h, h.wrapping_add(n), Ordering::Release) != h {
+        if self
+            .queue_head
+            .compare_and_swap(h, h.wrapping_add(n), Ordering::Release)
+            != h
+        {
             return false;
         }
 
@@ -521,8 +529,11 @@ impl Processor {
                 }
             }
 
-            if self.queue_head
-                   .compare_and_swap(h, h.wrapping_add(n), Ordering::Release) == h {
+            if self
+                .queue_head
+                .compare_and_swap(h, h.wrapping_add(n), Ordering::Release)
+                == h
+            {
                 return n;
             }
         }
@@ -545,8 +556,7 @@ impl Processor {
         if n != 0 {
             // synchronize with consumers
             let h = self.queue_head.load(Ordering::Acquire);
-            assert!(t.wrapping_sub(h).wrapping_add(n) < QUEUE_SIZE,
-                    "queue overflow");
+            assert!(t.wrapping_sub(h).wrapping_add(n) < QUEUE_SIZE, "queue overflow");
             // makes the item available for consumption
             self.queue_tail.store(t.wrapping_add(n), Ordering::Release);
         }
@@ -558,9 +568,7 @@ impl Processor {
         self.thread_assert();
         trace!("{:?}: putting {} Coroutines to global", self, batch.len());
 
-        let iter = batch
-            .into_iter()
-            .map(|coro| unsafe { Handle::from_raw(*coro) });
+        let iter = batch.into_iter().map(|coro| unsafe { Handle::from_raw(*coro) });
         self.scheduler().push_global_queue_iter(iter);
     }
 
@@ -615,8 +623,7 @@ impl Processor {
 
             if cnt > 0 {
                 // makes the item available for consumption
-                self.queue_tail
-                    .store(t.wrapping_add(cnt), Ordering::Release);
+                self.queue_tail.store(t.wrapping_add(cnt), Ordering::Release);
             }
 
             cnt + 1
@@ -694,9 +701,9 @@ impl Processor {
             } else {
                 trace!("{:?}: parking", self);
                 scheduler.park_processor(|| {
-                                             run_next = self.fetch_foreign_coroutines();
-                                             run_next.is_none()
-                                         });
+                    run_next = self.fetch_foreign_coroutines();
+                    run_next.is_none()
+                });
                 trace!("{:?}: unparked", self);
             }
         }
@@ -724,14 +731,11 @@ impl Processor {
     fn resume(&mut self, coro: Handle) -> Option<Handle> {
         self.thread_assert();
 
-        assert!(coro.is_finished() == false,
-                "Cannot resume a finished coroutine");
+        assert!(coro.is_finished() == false, "Cannot resume a finished coroutine");
 
         trace!("{:?}: resuming {:?}", self, coro);
         let data = {
-            debug_assert!(self.current_coro.is_none(),
-                          "{:?} is still running!",
-                          self.current_coro);
+            debug_assert!(self.current_coro.is_none(), "{:?} is still running!", self.current_coro);
 
             self.current_coro = Some(coro);
 
@@ -742,9 +746,7 @@ impl Processor {
             }
         };
 
-        trace!("{:?}: Coroutine yield back with {:?}",
-               self,
-               self.current_coro);
+        trace!("{:?}: Coroutine yield back with {:?}", self, self.current_coro);
 
         let mut hdl = None;
         if let Some(coro) = self.current_coro.take() {
@@ -764,11 +766,7 @@ impl Processor {
                 State::Parked => {
                     assert!(data != 0, "Coroutine parked with data == 0");
                     // Take out the data carrier
-                    let carrier = unsafe {
-                        (&mut *(data as *mut Option<(usize, usize)>))
-                            .take()
-                            .unwrap()
-                    };
+                    let carrier = unsafe { (&mut *(data as *mut Option<(usize, usize)>)).take().unwrap() };
 
                     // Transmute the first item of the tuple back to the bridge function
                     let function: fn(usize, &mut Processor, Handle) = unsafe { mem::transmute(carrier.0) };
@@ -937,12 +935,12 @@ impl ExactSizeIterator for RandomProcessorIter {
 #[cfg(test)]
 mod test {
     use std::ops::Deref;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
+    use super::RandomProcessorOrder;
     use options::Options;
     use scheduler::Scheduler;
-    use super::RandomProcessorOrder;
 
     // Scheduler::spawn() must push the new coroutine at the head of the runqueue.
     // Thus if we spawn a number of coroutines they will be executed in reverse order.
@@ -959,9 +957,9 @@ mod test {
                     let results = results.clone();
 
                     Scheduler::spawn(move || {
-                                         let mut results = results.lock().unwrap();
-                                         results.push(i);
-                                     });
+                        let mut results = results.lock().unwrap();
+                        results.push(i);
+                    });
                 }
 
                 {
@@ -973,8 +971,7 @@ mod test {
 
                 let results = results.lock().unwrap();
                 assert_eq!(results.deref(), &expected);
-            })
-            .unwrap();
+            }).unwrap();
     }
 
     #[test]
@@ -989,7 +986,9 @@ mod test {
 
                 for _ in 0..300 {
                     let counter = counter.clone();
-                    let f = move || { counter.fetch_add(1, Ordering::SeqCst); };
+                    let f = move || {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    };
                     Scheduler::spawn_opts(f, opts.clone());
                 }
 
@@ -998,8 +997,7 @@ mod test {
                 }
 
                 assert_eq!(counter.load(Ordering::SeqCst), 300);
-            })
-            .unwrap();
+            }).unwrap();
     }
 
     #[test]

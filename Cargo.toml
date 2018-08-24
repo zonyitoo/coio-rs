@@ -11,20 +11,20 @@ license = "MIT/Apache-2.0"
 name = "coio"
 
 [dev-dependencies]
-clap = "2.24"
-env_logger = "0.4"
-num_cpus = "1.5"
+clap = "2"
+env_logger = "0.5"
+num_cpus = "1"
 
 [dependencies]
 context = "2.0"
 deque = "0.3"
 libc = "0.2"
-linked-hash-map = "0.4"
+linked-hash-map = "0.5"
 mio = "0.6"
 mio-uds = "0.6"
 mio-more = "0.1"
-rand = "0.3"
-slab = "0.3"
+rand = "0.5"
+slab = "0.4"
 time = "0.1"
 
 [dependencies.log]

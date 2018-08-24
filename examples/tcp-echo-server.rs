@@ -20,7 +20,7 @@ use coio::net::tcp::TcpListener;
 use coio::Scheduler;
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     let matches = App::new("tcp-echo")
         .version(env!("CARGO_PKG_VERSION"))

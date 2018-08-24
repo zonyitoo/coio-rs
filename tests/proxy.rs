@@ -5,20 +5,20 @@ extern crate mio;
 
 extern crate coio;
 
-use std::sync::Arc;
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use coio::Scheduler;
 use coio::net::tcp::{TcpListener, TcpStream};
+use coio::Scheduler;
 
 const LOCAL_ADDR: &'static str = "127.0.0.1:3020";
 const REMOTE_ADDR: &'static str = "127.0.0.1:3010";
 
 #[test]
 fn proxy_shared_tcp_stream() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     Scheduler::new()
         .with_workers(1)
@@ -188,6 +188,5 @@ fn proxy_shared_tcp_stream() {
             proxy.join().unwrap();
             local.join().unwrap();
             remote.join().unwrap();
-        })
-        .unwrap();
+        }).unwrap();
 }
