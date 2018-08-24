@@ -34,3 +34,6 @@ features = ["release_max_level_info"]
 [[bench]]
 name = "spinlock"
 harness = false
+
+[profile.release]
+debug = true

@@ -15,9 +15,9 @@ use std::ptr::{self, NonNull};
 
 use context::{Context, Transfer};
 
+use options::Options;
 use runtime::processor::Processor;
 use runtime::stack_pool::{Stack, StackPool};
-use options::Options;
 
 extern "C" fn coroutine_entry(t: Transfer) -> ! {
     // Take over the data from Coroutine::spawn_opts
@@ -300,10 +300,7 @@ impl Drop for Handle {
 
         trace!("{:?}: dropping with state {:?}", self, state);
         if state != State::Finished {
-            ctx = unsafe {
-                ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind)
-                    .context
-            };
+            ctx = unsafe { ctx.resume_ontop(self.0 as *mut _ as usize, coroutine_unwind).context };
         }
 
         debug_assert!(
@@ -635,12 +632,12 @@ impl Iterator for HandleListIntoIter {
 #[cfg(test)]
 mod test {
     use std::mem;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
+    use super::*;
     use options::Options;
     use scheduler::Scheduler;
-    use super::*;
 
     #[test]
     fn coroutine_size() {
@@ -694,8 +691,7 @@ mod test {
 
                     let result = handle.join();
                     assert!(result.is_err());
-                })
-                .unwrap();
+                }).unwrap();
         }
 
         assert_eq!(shared_usize.load(Ordering::SeqCst), 1);

@@ -201,7 +201,7 @@ impl fmt::Debug for ProcessorHandle {
 pub struct ProcessorInner {
     id: usize,
 
-    weak_self: WeakProcessor,
+    weak_self: Option<WeakProcessor>,
     scheduler: *mut Scheduler,
 
     chan_receiver: Receiver<ProcMessage>,
@@ -254,7 +254,7 @@ impl Processor {
         let mut p = Processor(Arc::new(UnsafeCell::new(ProcessorInner {
             id: processor_id,
 
-            weak_self: unsafe { mem::zeroed() },
+            weak_self: None,
             scheduler: sched,
 
             chan_receiver: rx,
@@ -274,7 +274,8 @@ impl Processor {
         {
             let weak_self = WeakProcessor(Arc::downgrade(&p.0));
             let inner = p.deref_mut();
-            mem::forget(mem::replace(&mut inner.weak_self, weak_self));
+            // mem::forget(mem::replace(&mut inner.weak_self, weak_self));
+            inner.weak_self = Some(weak_self);
         }
 
         let processor_handle = p.handle();
@@ -350,7 +351,7 @@ impl Processor {
     /// This method *is* thread safe.
     #[inline]
     pub fn weak_self(&self) -> &WeakProcessor {
-        &self.weak_self
+        &self.weak_self.as_ref().unwrap()
     }
 
     /// Returns the Processor id.
