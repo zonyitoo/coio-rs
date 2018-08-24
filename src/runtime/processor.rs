@@ -249,6 +249,49 @@ impl Processor {
         barrier: Arc<Barrier>,
         max_stack_memory_limit: usize,
     ) -> Machine {
+        let mut p = Processor::new(sched, processor_id, max_stack_memory_limit);
+
+        let processor_handle = p.handle();
+        let processor = p.clone();
+        let thread_handle = {
+            Builder::new()
+                .name(format!("Processor#{}", processor_id))
+                .stack_size(32 * 1024)
+                .spawn(move || {
+                    PROCESSOR.with(|proc_opt| unsafe {
+                        let proc_opt = &mut *proc_opt.get();
+                        *proc_opt = Some(p.clone());
+                    });
+
+                    barrier.wait();
+                    p.schedule();
+                }).unwrap()
+        };
+
+        Machine {
+            processor_handle: processor_handle,
+            processor: processor,
+            thread_handle: thread_handle,
+        }
+    }
+
+    /// Spawns in current thread
+    pub fn spawn_local(sched: *mut Scheduler,
+        processor_id: usize,
+        max_stack_memory_limit: usize,) -> Processor
+    {
+        let p = Processor::new(sched, processor_id, max_stack_memory_limit);
+        PROCESSOR.with(|proc_opt| unsafe {
+            let proc_opt = &mut *proc_opt.get();
+            *proc_opt = Some(p.clone());
+        });
+        p
+    }
+
+    fn new(sched: *mut Scheduler,
+        processor_id: usize,
+        max_stack_memory_limit: usize) -> Processor
+    {
         let (tx, rx) = mpsc::channel();
 
         let mut p = Processor(Arc::new(UnsafeCell::new(ProcessorInner {
@@ -278,28 +321,7 @@ impl Processor {
             inner.weak_self = Some(weak_self);
         }
 
-        let processor_handle = p.handle();
-        let processor = p.clone();
-        let thread_handle = {
-            Builder::new()
-                .name(format!("Processor#{}", processor_id))
-                .stack_size(32 * 1024)
-                .spawn(move || {
-                    PROCESSOR.with(|proc_opt| unsafe {
-                        let proc_opt = &mut *proc_opt.get();
-                        *proc_opt = Some(p.clone());
-                    });
-
-                    barrier.wait();
-                    p.schedule();
-                }).unwrap()
-        };
-
-        Machine {
-            processor_handle: processor_handle,
-            processor: processor,
-            thread_handle: thread_handle,
-        }
+        p
     }
 
     /// Get the thread local processor.
@@ -667,64 +689,73 @@ impl Processor {
         None
     }
 
-    fn schedule(&mut self) {
-        self.thread_assert();
-        trace!("{:?}: local scheduler begin", self);
-
-        let machine_len = self.scheduler().get_machines().len();
-        let scheduler = self.scheduler();
-        let mut run_next = None;
-
-        self.rand_order.reset(machine_len);
-
-        loop {
-            if let Ok(ProcMessage::Shutdown(barrier)) = self.chan_receiver.try_recv() {
-                trace!("{:?}: got shutdown signal", self);
-                barrier.wait();
-                break;
-            }
-
-            // TODO: Ensure that coroutines from foreign queues are fetched once in a while.
-
-            // Run tasks in local queue
-            if run_next.is_none() {
-                run_next = self.queue_pop_front();
-            }
-
-            if run_next.is_none() {
-                scheduler.inc_spinning();
-                run_next = self.fetch_foreign_coroutines();
-                scheduler.dec_spinning();
-            }
-
-            if let Some(hdl) = run_next {
-                run_next = self.resume(hdl);
-            } else {
-                trace!("{:?}: parking", self);
-                scheduler.park_processor(|| {
-                    run_next = self.fetch_foreign_coroutines();
-                    run_next.is_none()
-                });
-                trace!("{:?}: unparked", self);
-            }
-        }
-
-        // NOTE:
-        //   A Barrier is sent inside the ProcMessage::Shutdown and
-        //   awaited as soon as the Shutdown message is received.
-        //   This means that this point in schedule() outside of the main loop above is only
-        //   reached when all other Processors have fully acknowledged the Shutdown message too.
-        //   We can thus safely access any local members without synchronization.
-
-        trace!("{:?}: dropping run_next", self);
-        drop(run_next);
-
-        trace!("{:?}: dropping local coroutines", self);
+    fn drop_local_coroutines_unlock(&mut self) {
         while self.queue_head.load(Ordering::Relaxed) != self.queue_tail.load(Ordering::Relaxed) {
             // pop from tail of local queue
             let t = self.queue_tail.fetch_sub(1, Ordering::Relaxed) - 1;
             let _coro = unsafe { Handle::from_raw(*self.queue.get_unchecked(t % QUEUE_SIZE)) };
         }
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn schedule(&mut self) {
+        self.thread_assert();
+        trace!("{:?}: local scheduler begin", self);
+
+        let machine_len = self.scheduler().get_machines().len();
+        let scheduler = self.scheduler();
+
+        {
+            let mut run_next = None;
+
+            self.rand_order.reset(machine_len);
+
+            loop {
+                if let Ok(ProcMessage::Shutdown(barrier)) = self.chan_receiver.try_recv() {
+                    trace!("{:?}: got shutdown signal", self);
+                    barrier.wait();
+                    break;
+                }
+
+                // TODO: Ensure that coroutines from foreign queues are fetched once in a while.
+
+                // Run tasks in local queue
+                if run_next.is_none() {
+                    run_next = self.queue_pop_front();
+                }
+
+                if run_next.is_none() {
+                    scheduler.inc_spinning();
+                    run_next = self.fetch_foreign_coroutines();
+                    scheduler.dec_spinning();
+                }
+
+                if let Some(hdl) = run_next {
+                    run_next = self.resume(hdl);
+                } else {
+                    trace!("{:?}: parking", self);
+                    scheduler.park_processor(|| {
+                        run_next = self.fetch_foreign_coroutines();
+                        run_next.is_none()
+                    });
+                    trace!("{:?}: unparked", self);
+                }
+            }
+
+            // NOTE:
+            //   A Barrier is sent inside the ProcMessage::Shutdown and
+            //   awaited as soon as the Shutdown message is received.
+            //   This means that this point in schedule() outside of the main loop above is only
+            //   reached when all other Processors have fully acknowledged the Shutdown message too.
+            //   We can thus safely access any local members without synchronization.
+
+            trace!("{:?}: dropping run_next", self);
+        }
+
+        trace!("{:?}: dropping local coroutines", self);
+        self.drop_local_coroutines_unlock();
+
+        assert!(self.current_coro.is_none());
 
         trace!("{:?}: local scheduler end", self);
     }

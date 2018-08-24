@@ -280,149 +280,175 @@ impl Scheduler {
             );
         }
 
-        // Timer has to be setup before any kind of operations on it
-        self.timer.lock().setup();
-
-        trace!("creating EventLoop");
-
-        let mut event_loop = Poll::new().unwrap();
-
-        let (tx, rx) = ::mio_more::channel::channel();
-        // FIXME: I use Token(0) expr right here because const_fn is still unstable
-        // It should be replaced by a const definition
-        event_loop
-            .register(&rx, Token(0), Ready::readable() | Ready::writable(), PollOpt::edge())
-            .unwrap();
-        // Occupy the 0 index in slab
-        self.slab.insert(ReadyStates::new());
-
-        self.event_loop_sender = Some(tx.clone());
-
         let mut result = None;
-
-        let cloned_event_loop_sender = tx;
         {
-            let result = unsafe { &mut *(&mut result as *mut _) };
-            let wrapper = move || {
-                let ret = panic::catch_unwind(panic::AssertUnwindSafe(f));
+            // Timer has to be setup before any kind of operations on it
+            self.timer.lock().setup();
 
-                *result = Some(ret);
+            trace!("creating EventLoop");
 
-                trace!("Coroutine(<main>) finished => sending Shutdown");
-                let _ = cloned_event_loop_sender.send(Message::Shutdown);
+            let mut event_loop = Poll::new().unwrap();
+
+            let (tx, rx) = ::mio_more::channel::channel();
+            // FIXME: I use Token(0) expr right here because const_fn is still unstable
+            // It should be replaced by a const definition
+            event_loop
+                .register(&rx, Token(0), Ready::readable() | Ready::writable(), PollOpt::edge())
+                .unwrap();
+            // Occupy the 0 index in slab
+            self.slab.insert(ReadyStates::new());
+
+            self.event_loop_sender = Some(tx.clone());
+
+            let cloned_event_loop_sender = tx;
+            {
+                let result = unsafe { &mut *(&mut result as *mut _) };
+                let wrapper = move || {
+                    let ret = panic::catch_unwind(panic::AssertUnwindSafe(f));
+
+                    *result = Some(ret);
+
+                    trace!("Coroutine(<main>) finished => sending Shutdown");
+                    let _ = cloned_event_loop_sender.send(Message::Shutdown);
+                };
+
+                let mut opt = self.default_spawn_options.clone();
+                opt.name("<main>".to_owned());
+                let main_coro = Coroutine::spawn_opts(Box::new(wrapper), opt);
+
+                self.push_global_queue(main_coro);
             };
 
-            let mut opt = self.default_spawn_options.clone();
-            opt.name("<main>".to_owned());
-            let main_coro = Coroutine::spawn_opts(Box::new(wrapper), opt);
+            let machines = unsafe { &mut *self.machines.get() };
+            machines.reserve(self.expected_worker_count);
 
-            self.push_global_queue(main_coro);
-        };
-
-        let machines = unsafe { &mut *self.machines.get() };
-        machines.reserve(self.expected_worker_count);
-
-        trace!("spawning Machines");
-        {
-            let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
-            let mem = self.maximum_stack_memory_limit;
-
-            for tid in 0..self.expected_worker_count {
-                machines.push(Processor::spawn(self, tid, barrier.clone(), mem));
-            }
-
-            // After this Barrier unblocks we know that all Processors a fully spawned and
-            // ready to call Processor::schedule(). This knowledge plus the fact that machines
-            // is a static array after this point allows us to access that array without locks.
-            barrier.wait();
-        }
-
-        trace!("running EventLoop");
-
-        let mut events = Events::with_capacity(1024);
-
-        while self.is_running {
-            let next_tick = self.timer.lock().next_tick_in_ms();
-            let next_tick = next_tick.map(|ms| {
-                if ms > usize::max_value() as u64 {
-                    usize::max_value()
-                } else if ms < usize::min_value() as u64 {
-                    usize::min_value()
-                } else {
-                    ms as usize
-                }
-            });
-            trace!("run_once({:?})", next_tick);
-
-            let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
-
-            event_loop
-                .poll(&mut events, next_tick.or(Some(Duration::from_millis(1000))))
-                .unwrap();
-
-            // FIXME: Rightnow for migrating from MIO v0.5 to v0.6, I chose to iterate every events in the
-            // list and call the old Handler interface.
-            // Maybe we can handle all the event in a batch
-            for event in events.iter() {
-                match event.token() {
-                    // Token(0) represents loop channel receiver
-                    Token(0) => {
-                        // This is a channel
-                        while let Ok(t) = rx.try_recv() {
-                            self.io_notify(&mut event_loop, t);
-                        }
-                    }
-                    token => {
-                        self.io_ready(&mut event_loop, token, event.readiness());
-                    }
-                }
-            }
-
+            trace!("spawning Machines");
             {
-                let mut timer = self.timer.lock();
-                let now = timer.now();
+                let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
+                let mem = self.maximum_stack_memory_limit;
 
-                loop {
-                    trace!("tick");
-                    match timer.tick_to(now) {
-                        Some(TimerWaitType::Handle(hdl)) => self.io_handler_queue.push_back(hdl),
-                        Some(TimerWaitType::Waiter(waiter_ptr)) => {
-                            let waiter = unsafe { &*waiter_ptr.as_ptr() };
-                            if let Some(hdl) = waiter.notify(WaiterState::Timeout) {
-                                self.io_handler_queue.push_back(hdl);
+                for tid in 0..self.expected_worker_count {
+                    machines.push(Processor::spawn(self, tid + 1, barrier.clone(), mem));
+                }
+
+                // After this Barrier unblocks we know that all Processors a fully spawned and
+                // ready to call Processor::schedule(). This knowledge plus the fact that machines
+                // is a static array after this point allows us to access that array without locks.
+                barrier.wait();
+            }
+
+            trace!("running EventLoop");
+
+            let mut events = Events::with_capacity(1024);
+
+            while self.is_running {
+                let next_tick = self.timer.lock().next_tick_in_ms();
+                let next_tick = next_tick.map(|ms| {
+                    if ms > usize::max_value() as u64 {
+                        usize::max_value()
+                    } else if ms < usize::min_value() as u64 {
+                        usize::min_value()
+                    } else {
+                        ms as usize
+                    }
+                });
+                trace!("run_once({:?})", next_tick);
+
+                let next_tick = next_tick.map(|ms| Duration::from_millis(ms as u64));
+
+                event_loop
+                    .poll(&mut events, next_tick.or(Some(Duration::from_millis(1000))))
+                    .unwrap();
+
+                // FIXME: Rightnow for migrating from MIO v0.5 to v0.6, I chose to iterate every events in the
+                // list and call the old Handler interface.
+                // Maybe we can handle all the event in a batch
+                for event in events.iter() {
+                    match event.token() {
+                        // Token(0) represents loop channel receiver
+                        Token(0) => {
+                            // This is a channel
+                            while let Ok(t) = rx.try_recv() {
+                                self.io_notify(&mut event_loop, t);
                             }
                         }
-                        None => break,
+                        token => {
+                            self.io_ready(&mut event_loop, token, event.readiness());
+                        }
                     }
+                }
+
+                {
+                    let mut timer = self.timer.lock();
+                    let now = timer.now();
+
+                    loop {
+                        trace!("tick");
+                        match timer.tick_to(now) {
+                            Some(TimerWaitType::Handle(hdl)) => self.io_handler_queue.push_back(hdl),
+                            Some(TimerWaitType::Waiter(waiter_ptr)) => {
+                                let waiter = unsafe { &*waiter_ptr.as_ptr() };
+                                if let Some(hdl) = waiter.notify(WaiterState::Timeout) {
+                                    self.io_handler_queue.push_back(hdl);
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+
+                self.append_io_handler_to_global_queue();
+            }
+
+            // Ask all processors to stop
+            trace!("EventLoop finished => sending Shutdown");
+
+            // Create a local processor
+            // Because when destroying those coroutines that are waiting for events in slab or event queue
+            // the socket will require a Scheduler to send Deregister message, otherwise it will panic!
+            // Which will cause panic while panicking!!!
+            let mut cur_proc = Processor::spawn_local(self, 0, self.maximum_stack_memory_limit);
+            {
+                let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
+
+                for m in machines.iter() {
+                    m.processor_handle.send(ProcMessage::Shutdown(barrier.clone())).unwrap();
+                }
+
+                *self.idle_processor_mutex.lock().unwrap() = true;
+                self.idle_processor_condvar.notify_all();
+
+                let h = cur_proc.handle();
+                let _ = h.send(ProcMessage::Shutdown(barrier));
+                cur_proc.schedule();
+
+                // barrier.wait();
+            }
+
+            trace!("awaiting completion of Machines");
+            {
+                *self.idle_processor_mutex.lock().unwrap() = true;
+                self.idle_processor_condvar.notify_all();
+                // NOTE: It's critical that all threads are joined since Processor
+                // maintains a reference to this Scheduler using raw pointers.
+                for m in machines.drain(..) {
+                    let _ = m.thread_handle.join();
                 }
             }
 
-            self.append_io_handler_to_global_queue();
-        }
+            // Force destroy all pending coroutines
+            // Must be cleared right here.
+            trace!("dropping io slab");
+            self.slab.clear();
 
-        trace!("EventLoop finished => sending Shutdown");
-        {
-            let barrier = Arc::new(Barrier::new(self.expected_worker_count + 1));
+            trace!("dropping global queue");
+            while let Some(..) = self.global_queue.lock().unwrap().pop_back() {}
 
-            for m in machines.iter() {
-                m.processor_handle.send(ProcMessage::Shutdown(barrier.clone())).unwrap();
-            }
+            trace!("dropping io handler queue");
+            while let Some(..) = self.io_handler_queue.pop_back() {}
 
-            *self.idle_processor_mutex.lock().unwrap() = true;
-            self.idle_processor_condvar.notify_all();
-
-            barrier.wait();
-        }
-
-        trace!("awaiting completion of Machines");
-        {
-            *self.idle_processor_mutex.lock().unwrap() = true;
-            self.idle_processor_condvar.notify_all();
-            // NOTE: It's critical that all threads are joined since Processor
-            // maintains a reference to this Scheduler using raw pointers.
-            for m in machines.drain(..) {
-                let _ = m.thread_handle.join();
-            }
+            trace!("dropping eventloop sender");
+            self.event_loop_sender = None;
         }
 
         // Restore panic handler
@@ -654,6 +680,8 @@ impl Scheduler {
     #[doc(hidden)]
     pub fn append_io_handler_to_global_queue(&mut self) {
         if !self.io_handler_queue.is_empty() {
+            trace!("Scheduler: io await {} handles", self.io_handler_queue.len());
+
             let size = {
                 let mut queue = self.global_queue.lock().unwrap();
                 queue.append(&mut self.io_handler_queue);
