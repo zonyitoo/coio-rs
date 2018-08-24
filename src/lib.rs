@@ -8,7 +8,7 @@
 
 //! Coroutine scheduling with asynchronous I/O support
 
-#![feature(asm, fnbox, optin_builtin_traits, shared)]
+#![feature(asm, fnbox, optin_builtin_traits)]
 
 #[macro_use]
 extern crate log;

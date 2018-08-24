@@ -13,7 +13,7 @@ use std::fmt::{self, Debug};
 use std::io::{self, Write};
 use std::mem;
 use std::panic;
-use std::ptr::Shared;
+use std::ptr::NonNull;
 use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -174,7 +174,7 @@ impl ReadyStates {
 
 enum TimerWaitType {
     Handle(Handle),
-    Waiter(Shared<Waiter>),
+    Waiter(NonNull<Waiter>),
 }
 
 /// Coroutine scheduler
@@ -612,7 +612,7 @@ impl Scheduler {
         let ret = {
             let mut timer = self.timer.lock();
             timer.timeout_ms(
-                TimerWaitType::Waiter(unsafe { Shared::new_unchecked(waiter) }),
+                TimerWaitType::Waiter(unsafe { NonNull::new_unchecked(waiter) }),
                 delay,
             )
         };

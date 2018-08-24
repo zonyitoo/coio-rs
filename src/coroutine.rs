@@ -11,7 +11,7 @@ use std::fmt;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::panic;
-use std::ptr::{self, Shared};
+use std::ptr::{self, NonNull};
 
 use context::{Context, Transfer};
 
@@ -121,7 +121,7 @@ pub struct Coroutine {
     name: Option<String>,
     state: State,
 
-    prev: Option<Shared<Coroutine>>,
+    prev: Option<NonNull<Coroutine>>,
     next: Option<Handle>,
 
     stack: Option<Stack>,
@@ -331,7 +331,7 @@ impl fmt::Debug for Handle {
 pub struct HandleList {
     length: usize,
     head: Option<Handle>,
-    tail: Option<Shared<Coroutine>>,
+    tail: Option<NonNull<Coroutine>>,
 }
 
 #[allow(dead_code)]
@@ -353,12 +353,12 @@ impl HandleList {
                 // Since head is None the list must be empty => set head and tail to hdl
                 let coro_ptr = hdl.0 as *mut _;
                 self.head = Some(hdl);
-                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
+                self.tail = Some(unsafe { NonNull::new_unchecked(coro_ptr) });
             }
             Some(ref mut head) => {
                 // Since head is Some the list must be non-empty
                 // Set prev of the current head to the soon-to-be head (hdl)
-                head.prev = Some(unsafe { Shared::new_unchecked(hdl.0 as *mut _) });
+                head.prev = Some(unsafe { NonNull::new_unchecked(hdl.0 as *mut _) });
                 // Set hdl as the new head
                 mem::swap(head, &mut hdl);
                 // head contains the pointer from hdl (and v.v.) => set the .next of the new head
@@ -376,7 +376,7 @@ impl HandleList {
                 // Since head is None the list must be empty => set head and tail to hdl
                 let coro_ptr = hdl.0 as *mut _;
                 self.head = Some(hdl);
-                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
+                self.tail = Some(unsafe { NonNull::new_unchecked(coro_ptr) });
             }
             Some(mut tail) => {
                 let coro_ptr = hdl.0 as *mut _;
@@ -388,7 +388,7 @@ impl HandleList {
                     tail_ref.next = Some(hdl);
                 }
                 // And we need to update our tail pointer of course
-                self.tail = Some(unsafe { Shared::new_unchecked(coro_ptr) });
+                self.tail = Some(unsafe { NonNull::new_unchecked(coro_ptr) });
             }
         }
 
@@ -495,7 +495,7 @@ impl HandleList {
         let mut next_head = coro_ref.next.take();
         next_head.as_mut().map(|h| h.prev = None);
 
-        let new_tail = Some(unsafe { Shared::new_unchecked(p) });
+        let new_tail = Some(unsafe { NonNull::new_unchecked(p) });
         mem::swap(&mut next_head, &mut self.head);
 
         self.length -= n;
